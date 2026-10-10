@@ -13,7 +13,10 @@ fn main() {
                     Ok(path) => {
                         println!("  downloaded to : {}", path.display());
                         let parent = path.parent().unwrap();
-                        println!("  in temp dir?  : {}", parent.starts_with(std::env::temp_dir()));
+                        println!(
+                            "  in temp dir?  : {}",
+                            parent.starts_with(std::env::temp_dir())
+                        );
                         println!("  tracked path  : {:?}", bhn_core::update::last_download());
                         println!(
                             "  matches       : {}",

@@ -407,7 +407,10 @@ mod remote {
             .call()
             .map_err(|error| format!("download failed: {error}"))?;
         if response.status() != 200 {
-            return Err(format!("download failed: GitHub answered {}", response.status()));
+            return Err(format!(
+                "download failed: GitHub answered {}",
+                response.status()
+            ));
         }
 
         // Far larger than any build of this app; the cap only stops an
@@ -452,8 +455,7 @@ mod remote {
 
 #[cfg(feature = "updates")]
 pub use remote::{
-    check, check_due, download, last_download, now_secs, CheckResult, Release,
-    CHECK_INTERVAL_SECS,
+    check, check_due, download, last_download, now_secs, CheckResult, Release, CHECK_INTERVAL_SECS,
 };
 
 #[cfg(all(test, feature = "updates"))]
