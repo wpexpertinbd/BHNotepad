@@ -113,15 +113,19 @@ jobs:
           # Tauri's dmg script has also been seen leaving the finished .dmg in
           # the staging directory rather than bundle/dmg, so search broadly and
           # skip its read-write working images (rw.*.dmg).
+          # ⚠️ Search BOTH roots. `.cargo/config.toml` sends build output to
+          # `build.noindex/target` so macOS Spotlight does not index the dev
+          # build and show a second BHNotepad in Finder — but `target` is kept
+          # here so this keeps working if that setting is ever changed back.
           files=()
-          while IFS= read -r f; do files+=("$f"); done < <(find target -type f \
+          while IFS= read -r f; do files+=("$f"); done < <(find build.noindex target -type f \
             \( -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \
                -o -name '*.deb' -o -name '*.rpm' \) \
-            -not -name '*.sig' -not -name 'rw.*.dmg' | sort)
+            -not -name '*.sig' -not -name 'rw.*.dmg' 2>/dev/null | sort)
 
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::no installers were produced"
-            find target -maxdepth 4 -type d -name bundle -exec find {} -type f \; | head -40
+            find build.noindex target -maxdepth 5 -type d -name bundle -exec find {} -type f \; 2>/dev/null | head -40
             exit 1
           fi
 

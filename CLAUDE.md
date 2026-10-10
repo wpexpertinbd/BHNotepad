@@ -577,3 +577,38 @@ floating in white space.
 ⚠️ `Quartz`/pyobjc is **not** available on this Mac, so `screencapture -l <CGWindowID>` — the
 nicest method, since nothing can overlap a single-window capture — was not usable. `-R` with
 bounds plus a detached shutter is the fallback.
+
+---
+
+## 🔍 Dev builds must never be Spotlight-indexed (2026-10-11)
+
+Benjamin: *"mac finder still showing 2 BHNotepad bro"* → *"make any development apps version
+non-indexable bro"*. Spotlight had indexed **two**:
+
+```
+/Applications/BHNotepad.app                                    ← the real one
+<repo>/target/aarch64-apple-darwin/release/bundle/macos/…      ← the dev build
+```
+
+Note a plain `find` over `/Users` with `-maxdepth 8` did **not** reach the second one — the build
+path is deeper than that. `mdfind "kMDItemFSName == 'BHNotepad.app'"` is what shows what Finder
+actually shows.
+
+**Fix: `.cargo/config.toml` with `target-dir = "build.noindex/target"`.** Spotlight and Launchpad
+skip any folder whose name ends in `.noindex`. ⚠️ A `.metadata_never_index` file inside an
+ordinary folder does **nothing** on current macOS — the suffix is what matters. Same lesson as
+BHDisplay, now applied here.
+
+⚠️ **This moves the build output, which would have silently broken the release workflow** — its
+collector did `find target …` and would have found nothing, producing a release with no
+installers. `release.yml` now searches `build.noindex target` (both, so it keeps working if the
+setting is ever reverted) and the diagnostic `find` on failure does too. Dry-run against a real
+build before committing.
+
+### ⚠️ `bundle_dmg.sh` fails when stale `/Volumes/dmg.*` mounts pile up
+A third distinct cause, after the missing `licenseFile` and the "File exists" one. Each failed
+bundling run leaves its scratch volume mounted; once a couple have accumulated, every later run
+fails — while running `bundle_dmg.sh` **by hand succeeds**, which is the tell that it is
+environmental rather than a config problem. Clear them with
+`for v in /Volumes/dmg.*; do hdiutil detach "$v"; done` and delete any `rw.*.dmg` staging images.
+CI is unaffected: runners are fresh.

@@ -1,4 +1,5 @@
-# Rust
+# Rust. Note the real output path is build.noindex/target — see
+# .cargo/config.toml — but /target is still ignored in case that is changed.
 /target/
 
 # Node

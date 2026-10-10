@@ -1,0 +1,10 @@
+# Build output goes into a *.noindex folder so Spotlight and Launchpad skip it.
+#
+# Without this, every `tauri build` leaves a BHNotepad.app under target/ that
+# Spotlight indexes, and Finder then shows TWO BHNotepads — the installed one
+# and the dev build. Benjamin hit exactly this, and hit it on BHDisplay before.
+#
+# ⚠️ The folder name must END in `.noindex`. Dropping a `.metadata_never_index`
+# file inside an ordinary folder does nothing on current macOS.
+[build]
+target-dir = "build.noindex/target"
