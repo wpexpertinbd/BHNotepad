@@ -110,6 +110,37 @@ impl Buffer {
     }
 }
 
+/// A tab that was closed, kept so it can be reopened.
+///
+/// ⚠️ This deliberately RETAINS the text of a closed tab, which cuts against
+/// the rule that closing a tab should be the end of what was in it. Restoring
+/// a tab closed by accident is worth more than that purity — Notepad++ keeps
+/// one too — but the retention is bounded, and SECURITY.md says so plainly
+/// rather than leaving it as a surprise.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ClosedTab {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default = "default_eol")]
+    pub eol: String,
+    /// Whether a snapshot of its text was kept. A saved file with no unsaved
+    /// edits needs none — reopening re-reads the file.
+    #[serde(default)]
+    pub has_snapshot: bool,
+}
+
+/// How many closed tabs are remembered. Ten matches the length of Notepad++'s
+/// own recent list and bounds how much closed text sits on disk.
+pub const CLOSED_HISTORY: usize = 10;
+
+/// How many recently opened file paths are remembered.
+pub const RECENT_FILES: usize = 10;
+
 /// Every open tab, in tab-bar order, plus which one is in front.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Session {
@@ -120,6 +151,12 @@ pub struct Session {
     /// Index into `buffers`. Always valid after [`Session::normalize`].
     #[serde(default)]
     pub active: usize,
+    /// Files opened or saved recently, newest first.
+    #[serde(default)]
+    pub recent: Vec<String>,
+    /// Tabs that were closed, newest first, for Restore Recent Closed File.
+    #[serde(default)]
+    pub closed: Vec<ClosedTab>,
 }
 
 fn default_version() -> u32 {
@@ -132,6 +169,8 @@ impl Default for Session {
             version: SESSION_VERSION,
             buffers: Vec::new(),
             active: 0,
+            recent: Vec::new(),
+            closed: Vec::new(),
         }
     }
 }
@@ -180,7 +219,17 @@ impl Session {
         if self.active >= self.buffers.len() {
             self.active = self.buffers.len().saturating_sub(1);
         }
+        self.closed.truncate(CLOSED_HISTORY);
+        self.closed.retain(|c| is_safe_id(&c.id));
+        self.recent.truncate(RECENT_FILES);
         self.version = SESSION_VERSION;
+    }
+
+    /// Records a file as recently used, newest first and without duplicates.
+    pub fn remember_recent(&mut self, path: &str) {
+        self.recent.retain(|existing| existing != path);
+        self.recent.insert(0, path.to_string());
+        self.recent.truncate(RECENT_FILES);
     }
 
     /// The next free `new N` title, matching Notepad++: the lowest number not

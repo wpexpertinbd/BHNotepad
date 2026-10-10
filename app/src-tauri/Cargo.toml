@@ -24,6 +24,12 @@ tauri = { version = "2", features = [] }
 # Native Open/Save sheets. Writing our own file browser in the webview would
 # be both bigger and worse than the one each OS already has.
 tauri-plugin-dialog = "2"
+# Reveal a file in Finder / Explorer / the desktop file manager. Nothing else
+# from this plugin is enabled; see capabilities/default.json.
+tauri-plugin-opener = "2"
+# Move to Trash / Recycle Bin rather than unlink, so a deleted file is
+# recoverable. Same crate BHUninstaller uses.
+trash = "5"
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true

@@ -8,7 +8,17 @@
 import { useEffect, useRef } from "react";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, rectangularSelection, crosshairCursor } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  copyLineDown,
+  defaultKeymap,
+  deleteLine,
+  history,
+  historyKeymap,
+  indentWithTab,
+  moveLineDown,
+  moveLineUp,
+  toggleComment,
+} from "@codemirror/commands";
 import { search, highlightSelectionMatches } from "@codemirror/search";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 
@@ -51,6 +61,13 @@ interface Props {
    * the PREVIOUS text and reports success.
    */
   registerFlush: (flush: (() => Promise<void>) | null) => void;
+  /**
+   * Receives a function that discards a tab's parked EditorState.
+   *
+   * Reload replaces a tab's text on disk; without dropping the parked state
+   * the editor would keep showing the document it had before.
+   */
+  registerForget: (forget: ((id: string) => void) | null) => void;
   /** Line/column for the status bar. Throttled, not debounced — it should
    *  track the caret closely without re-rendering on every keystroke. */
   onCaretInfo: (info: { line: number; col: number; selected: number }) => void;
@@ -68,6 +85,7 @@ export function Editor({
   onTextChanged,
   onPositionChanged,
   registerFlush,
+  registerForget,
   onCaretInfo,
   onViewReady,
 }: Props) {
@@ -93,6 +111,7 @@ export function Editor({
     onCaretInfo,
     onViewReady,
     registerFlush,
+    registerForget,
   });
   callbacks.current = {
     onTextChanged,
@@ -100,6 +119,7 @@ export function Editor({
     onCaretInfo,
     onViewReady,
     registerFlush,
+    registerForget,
   };
 
   const makeState = (contents: string, wrap: boolean) =>
@@ -120,7 +140,18 @@ export function Editor({
         // CodeMirror's own docked panel. Find/Replace is a floating dialog
         // here (FindDialog.tsx), driven through these same commands.
         search(),
-        keymap.of([...historyKeymap, ...defaultKeymap, indentWithTab]),
+        keymap.of([
+          // Notepad++'s line operations. Bound here rather than on the window
+          // so they cannot fire while a Find field has focus.
+          { key: "Mod-d", run: copyLineDown },
+          { key: "Mod-Shift-l", run: deleteLine },
+          { key: "Alt-ArrowUp", run: moveLineUp },
+          { key: "Alt-ArrowDown", run: moveLineDown },
+          { key: "Mod-/", run: toggleComment },
+          ...historyKeymap,
+          ...defaultKeymap,
+          indentWithTab,
+        ]),
         editorTheme,
         highlighting,
         language.current.of([]),
@@ -209,9 +240,17 @@ export function Editor({
       await callbacks.current.onTextChanged(id, instance.state.doc.toString());
     };
     callbacks.current.registerFlush(flush);
+    callbacks.current.registerForget((id: string) => {
+      states.current.delete(id);
+      if (currentId.current === id) {
+        // The visible tab: force the swap effect to rebuild it next render.
+        currentId.current = null;
+      }
+    });
 
     return () => {
       callbacks.current.registerFlush(null);
+      callbacks.current.registerForget(null);
       callbacks.current.onViewReady(null);
       // Anything still pending must reach disk; a React remount in development
       // would otherwise drop the last few hundred milliseconds of typing.

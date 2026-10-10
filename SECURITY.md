@@ -20,6 +20,11 @@ Nothing leaves your machine.
 - **Your notes stay in your user folder** — `~/Library/Application Support/BHNotepad` on macOS,
   `%APPDATA%\BHNotepad` on Windows, `${XDG_CONFIG_HOME:-~/.config}/BHNotepad` on Linux — in plain
   text, readable by you and by anything else running as you.
+- **A closed tab's text is kept so it can be restored.** Closing a tab moves its snapshot to a
+  `closed/` folder beside your session rather than deleting it, so Restore Recent Closed File can
+  bring it back. The last ten are kept and older ones are deleted properly. If you closed a tab
+  to be rid of what was in it, use **View → Forget Closed Tabs**, which removes the history and
+  every snapshot in it.
 - **Scratch notes are NOT encrypted.** They are ordinary files, exactly like the ones you would
   save yourself. Do not keep passwords, keys or other secrets in them. On macOS and Linux the
   store directory is created `0700` and every file in it `0600`, so other accounts on the same

@@ -23,10 +23,23 @@ export interface Buffer {
 }
 
 /** Mirrors `bhn_core::session::Session`. */
+export interface ClosedTab {
+  id: string;
+  title: string;
+  path: string | null;
+  language: string;
+  eol: string;
+  has_snapshot: boolean;
+}
+
 export interface Session {
   version: number;
   buffers: Buffer[];
   active: number;
+  /** Files opened or saved recently, newest first. */
+  recent: string[];
+  /** Tabs that were closed, newest first. */
+  closed: ClosedTab[];
 }
 
 export interface Opened {
@@ -48,6 +61,16 @@ export const newTab = () => invoke<Opened>("new_tab");
 export const openPath = (path: string) => invoke<Opened>("open_path", { path });
 export const closeTab = (id: string) => invoke<Session>("close_tab", { id });
 export const closeAll = () => invoke<Session>("close_all");
+export const closeOthers = (id: string) => invoke<Session>("close_others", { id });
+export const closeToLeft = (id: string) => invoke<Session>("close_to_left", { id });
+export const closeToRight = (id: string) => invoke<Session>("close_to_right", { id });
+export const restoreClosed = () => invoke<Opened | null>("restore_closed");
+export const forgetClosed = () => invoke<Session>("forget_closed");
+export const reload = (id: string) => invoke<Opened>("reload", { id });
+export const rename = (id: string, path: string) => invoke<Session>("rename", { id, path });
+export const saveCopy = (id: string, path: string) => invoke<void>("save_copy", { id, path });
+export const reveal = (path: string) => invoke<void>("reveal", { path });
+export const moveToTrash = (id: string) => invoke<Session>("move_to_trash", { id });
 export const unsavedTabs = () => invoke<Buffer[]>("unsaved_tabs");
 export const saveBuffer = (id: string, path?: string) =>
   invoke<Session>("save", { id, path: path ?? null });

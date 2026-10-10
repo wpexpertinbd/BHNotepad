@@ -478,51 +478,73 @@ body {
   color: var(--accent);
 }
 
-/* ── File menu ────────────────────────────────────────────────────────── */
 
-.filemenu {
-  position: relative;
-  flex: 0 0 auto;
+/* ── Menu bar ─────────────────────────────────────────────────────────────
+ * A row of menus above the tab strip, the way Notepad++ lays it out. */
+
+.menubar {
   display: flex;
   align-items: stretch;
+  flex: 0 0 auto;
+  height: 26px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+  /* Room for the traffic lights, which sit over the window on macOS. */
+  padding-left: env(titlebar-area-x, 0);
 }
 
-.filemenu-button {
+.menu {
+  position: relative;
+  display: flex;
+}
+
+.menu-title {
   border: 0;
-  border-right: 1px solid var(--border);
   background: transparent;
-  color: var(--muted);
+  color: var(--text);
   font: 12px var(--ui);
-  padding: 0 13px;
+  padding: 0 11px;
   cursor: default;
 }
 
-.filemenu-button:hover,
-.filemenu-button.is-on {
-  background: var(--tab-hover-bg);
-  color: var(--text);
+.menu-title:hover,
+.menu-title.is-on {
+  background: var(--accent);
+  color: #fff;
 }
 
-.filemenu-popup {
+.menu-popup {
   position: absolute;
   top: 100%;
-  left: 4px;
-  z-index: 30;
-  min-width: 228px;
+  left: 0;
+  z-index: 40;
+  min-width: 252px;
+  max-width: 460px;
   padding: 5px;
   background: var(--panel-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow:
-    0 10px 28px rgba(0, 0, 0, 0.22),
-    0 2px 6px rgba(0, 0, 0, 0.14);
+    0 12px 30px rgba(0, 0, 0, 0.24),
+    0 2px 6px rgba(0, 0, 0, 0.15);
 }
 
-.filemenu-popup button {
+.menu-row {
+  position: relative;
+}
+
+.menu-sub {
+  top: -5px;
+  left: 100%;
+  margin-left: 2px;
+}
+
+.menu-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
+  gap: 26px;
   width: 100%;
   border: 0;
   background: transparent;
@@ -532,32 +554,67 @@ body {
   padding: 5px 9px;
   border-radius: 5px;
   cursor: default;
+  white-space: nowrap;
 }
 
-.filemenu-popup button:hover {
+.menu-item:hover:not(:disabled),
+.menu-row.has-submenu:hover > .menu-item {
   background: var(--accent);
   color: #fff;
 }
 
-.filemenu-popup button:hover .shortcut {
+.menu-item:hover:not(:disabled) .shortcut,
+.menu-row.has-submenu:hover > .menu-item .chev {
   color: rgba(255, 255, 255, 0.85);
 }
 
-.filemenu-popup button.is-separated {
+.menu-item:disabled {
+  opacity: 0.4;
+}
+
+.menu-item.is-separated,
+.menu-row.is-separated {
   margin-top: 5px;
   border-top: 1px solid var(--border);
   padding-top: 8px;
-  border-radius: 0 0 5px 5px;
 }
 
-.filemenu-popup .shortcut {
+/* A recent-file path is long; keep the menu a sane width and show the end,
+ * which is the part that identifies the file. */
+.menu-item .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.menu-item .shortcut,
+.menu-item .chev {
   color: var(--muted);
   font-size: 11px;
-  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
 }
 
-/* A tab whose file could not be decoded cleanly: saving over the original is
- * refused, so the status bar has to say why rather than just failing later. */
-.statusbar .is-warning {
-  color: var(--syn-invalid);
+.menu-empty {
+  padding: 6px 9px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* CodeMirror's Go to Line panel, which we do use. */
+.cm-panel.cm-gotoLine {
+  padding: 8px 10px;
+  font-family: var(--ui);
+}
+
+.cm-panel.cm-gotoLine input,
+.cm-panel.cm-gotoLine button {
+  font: 12px var(--ui);
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 7px;
+  margin-right: 4px;
 }

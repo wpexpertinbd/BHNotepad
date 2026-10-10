@@ -386,3 +386,55 @@ JavaScript string. That is a consequence of choosing Tauri + CodeMirror over Sci
 **If this is revisited:** 512 MB is the largest size *verified to work*, not a cautious guess.
 Do not raise the default without re-running the measurement, and do not lower it without a
 reason — he has a real use case at this size.
+
+---
+
+## 🧾 v0.3.0 — menu bar, 2026-10-10
+
+Benjamin tested the **Windows build and it works** (first real-hardware confirmation), then asked
+for more of Notepad++'s menus. He picked "File + Edit + Search essentials" from four scopes.
+
+### ⚠️ Shortcuts now match Notepad++, and two were WRONG before
+Notepad++ uses **`Ctrl+Alt+S` = Save As** and **`Ctrl+Shift+S` = Save All**. This app shipped them
+the other way round in 0.1–0.2. For someone with twenty years of that muscle memory it is daily
+friction, so they were swapped. Do not "fix" them back.
+
+### What was added
+- **A real menu bar** (`MenuBar.tsx`) above the tab strip — File, Edit, Search, View — replacing
+  the single File button that used to sit inside the tab strip. `FileMenu.tsx` is gone.
+- **File:** Open Recent (10, newest first, no duplicates), Restore Recent Closed File
+  (`Cmd/Ctrl+Shift+T`), Reload from Disk (`Cmd/Ctrl+R`), Save a Copy As, Rename, Show in
+  Finder/Explorer, Move to Trash, Close All but This / to the Left / to the Right.
+- **Edit:** undo/redo/cut/copy/paste/select all, Duplicate Line (`Mod-d`), Delete Line
+  (`Mod-Shift-l`), Move Line Up/Down (`Alt-↑/↓`), Indent/Outdent, Toggle Comment (`Mod-/`),
+  UPPERCASE, lowercase, Trim Trailing Space.
+- **Search:** Find, Replace, Go to Line (`Cmd/Ctrl+G`, CodeMirror's own panel, themed).
+- **View:** Zoom In/Out/Reset (persisted in `localStorage`), Word Wrap, Forget Closed Tabs.
+
+Most of Edit was nearly free — the commands were already in `@codemirror/commands`, just unbound.
+Only case conversion and trim are hand-written (`editorCommands.ts`).
+
+### Design decisions worth keeping
+- **Closing a tab now RETIRES it** into `<configDir>/closed/` (a rename, not a copy — for a
+  500 MB tab that is the whole file) with a bounded history of 10. ⚠️ This deliberately softens
+  the earlier rule that closing a tab ends its text: restoring an accidental close is worth more,
+  Notepad++ does the same, and **View → Forget Closed Tabs** plus SECURITY.md cover the honest
+  disclosure. Eviction past the bound deletes the snapshot properly — there is a test for that.
+- **Close All goes through `close()`**, so it is recoverable one tab at a time. The confirmation
+  is about clearing the board, not about destroying text for good.
+- **Move to Trash uses the `trash` crate**, never `remove_file`. A text editor should not be able
+  to destroy a file beyond recovery from a menu click.
+- **Rename refuses to overwrite an existing file** rather than silently clobbering it.
+- **Editor-scoped keys live in CodeMirror's keymap, not on the window**, so they cannot fire while
+  a Find field has focus. App-scoped ones (save, reload, zoom, restore) stay on the window.
+- ⚠️ **Reload must drop the parked EditorState** (`registerForget`), or the tab keeps showing the
+  document it had before and the reload looks like it did nothing.
+
+### Bug found while testing
+**Re-opening an already-open file did not update its recency** — `open_path`'s early-return branch
+skipped `remember_recent`, so a file you kept coming back to sank down the Open Recent list.
+
+101 tests. Verified live: Cmd+D duplicates, Cmd+R reloads and clears the dirty flag, and
+Cmd+Shift+T brings a closed tab back with its text, language and path.
+⚠️ The menus themselves cannot be opened by the background automation tools (macOS reports them
+as pop-up controls), so they were verified by shortcut and by the accessibility tree instead.

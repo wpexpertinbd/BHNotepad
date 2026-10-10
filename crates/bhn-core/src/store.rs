@@ -191,6 +191,72 @@ impl Store {
         self.root.join("buffers")
     }
 
+    /// Where the snapshots of closed tabs wait to be restored.
+    pub fn closed_dir(&self) -> PathBuf {
+        self.root.join("closed")
+    }
+
+    fn closed_path(&self, id: &str) -> Result<PathBuf> {
+        if !is_safe_id(id) {
+            return Err(StoreError::UnsafeId(id.to_string()));
+        }
+        Ok(self.closed_dir().join(format!("{id}.txt")))
+    }
+
+    /// Moves a tab's snapshot aside so Restore Recent Closed File can bring it
+    /// back. Returns whether there was one to move.
+    ///
+    /// A rename rather than a copy: for a 500 MB tab the difference is the
+    /// whole file.
+    pub fn retire_buffer(&self, id: &str) -> Result<bool> {
+        let from = self.snapshot_path(id)?;
+        if !from.exists() {
+            return Ok(false);
+        }
+        let to = self.closed_path(id)?;
+        fs::create_dir_all(self.closed_dir())
+            .map_err(io(format!("creating {}", self.closed_dir().display())))?;
+        let _ = make_private_dir(&self.closed_dir());
+        fs::rename(&from, &to).map_err(io(format!("retiring {}", from.display())))?;
+        Ok(true)
+    }
+
+    /// Brings a retired snapshot back into the live buffers directory.
+    pub fn revive_buffer(&self, id: &str) -> Result<bool> {
+        let from = self.closed_path(id)?;
+        if !from.exists() {
+            return Ok(false);
+        }
+        let to = self.snapshot_path(id)?;
+        fs::rename(&from, &to).map_err(io(format!("restoring {}", from.display())))?;
+        Ok(true)
+    }
+
+    /// Deletes a retired snapshot for good.
+    pub fn forget_closed(&self, id: &str) -> Result<()> {
+        let path = self.closed_path(id)?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::Io {
+                context: format!("removing {}", path.display()),
+                source,
+            }),
+        }
+    }
+
+    pub fn read_closed(&self, id: &str) -> Result<String> {
+        let path = self.closed_path(id)?;
+        match fs::read(&path) {
+            Ok(bytes) => Ok(decode_utf8_lossy(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(source) => Err(StoreError::Io {
+                context: format!("reading {}", path.display()),
+                source,
+            }),
+        }
+    }
+
     fn snapshot_path(&self, id: &str) -> Result<PathBuf> {
         if !is_safe_id(id) {
             return Err(StoreError::UnsafeId(id.to_string()));

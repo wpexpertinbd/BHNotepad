@@ -203,6 +203,91 @@ fn flush(state: State<'_, AppState>) -> CommandResult<()> {
 	workspace.persist().map_err(to_message)
 }
 
+/// Reopens the most recently closed tab. Returns its id, or null if there is
+/// nothing to bring back.
+#[tauri::command]
+fn restore_closed(state: State<'_, AppState>) -> CommandResult<Option<Opened>> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	let Some(id) = workspace.restore_last_closed().map_err(to_message)? else {
+		return Ok(None);
+	};
+	let text = workspace.text(&id).map_err(to_message)?;
+	Ok(Some(Opened { session: workspace.session().clone(), id, text }))
+}
+
+/// Discards the closed-tab history, text included.
+#[tauri::command]
+fn forget_closed(state: State<'_, AppState>) -> CommandResult<Session> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	workspace.forget_closed_history().map_err(to_message)?;
+	Ok(workspace.session().clone())
+}
+
+/// Throws away unsaved edits and re-reads the file from disk.
+#[tauri::command]
+fn reload(state: State<'_, AppState>, id: String) -> CommandResult<Opened> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	let text = workspace.reload(&id).map_err(to_message)?;
+	Ok(Opened { session: workspace.session().clone(), id, text })
+}
+
+#[tauri::command]
+fn rename(state: State<'_, AppState>, id: String, path: String) -> CommandResult<Session> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	workspace.rename(&id, &path).map_err(to_message)?;
+	Ok(workspace.session().clone())
+}
+
+#[tauri::command]
+fn save_copy(state: State<'_, AppState>, id: String, path: String) -> CommandResult<()> {
+	let workspace = state.workspace.lock().map_err(to_message)?;
+	workspace.save_copy(&id, &path).map_err(to_message)
+}
+
+#[tauri::command]
+fn close_others(state: State<'_, AppState>, id: String) -> CommandResult<Session> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	workspace.close_others(&id).map_err(to_message)?;
+	Ok(workspace.session().clone())
+}
+
+#[tauri::command]
+fn close_to_left(state: State<'_, AppState>, id: String) -> CommandResult<Session> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	workspace.close_to_left(&id).map_err(to_message)?;
+	Ok(workspace.session().clone())
+}
+
+#[tauri::command]
+fn close_to_right(state: State<'_, AppState>, id: String) -> CommandResult<Session> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	workspace.close_to_right(&id).map_err(to_message)?;
+	Ok(workspace.session().clone())
+}
+
+/// Shows a file in Finder, Explorer or the desktop file manager.
+#[tauri::command]
+fn reveal(path: String) -> CommandResult<()> {
+	tauri_plugin_opener::reveal_item_in_dir(PathBuf::from(path)).map_err(to_message)
+}
+
+/// Moves the file a tab is backed by to the Trash, and closes the tab.
+///
+/// The Trash rather than an unlink: a text editor should not be able to
+/// destroy a file beyond recovery with one menu click.
+#[tauri::command]
+fn move_to_trash(state: State<'_, AppState>, id: String) -> CommandResult<Session> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	let path = workspace
+		.session()
+		.buffer(&id)
+		.and_then(|b| b.path.clone())
+		.ok_or_else(|| "That tab has never been saved, so there is no file to move".to_string())?;
+	trash::delete(&path).map_err(|error| format!("could not move {path} to the Trash: {error}"))?;
+	workspace.close(&id).map_err(to_message)?;
+	Ok(workspace.session().clone())
+}
+
 /// The size limit and where to change it, for the status bar's message.
 #[derive(Serialize)]
 struct Limits {
@@ -343,6 +428,7 @@ pub fn run() {
 
 	builder
 		.plugin(tauri_plugin_dialog::init())
+		.plugin(tauri_plugin_opener::init())
 		.setup(|app| {
 			let root = config_root();
 			let (workspace, note) = Workspace::open(&root)
@@ -394,6 +480,16 @@ pub fn run() {
 			flush,
 			detect_language,
 			limits,
+			restore_closed,
+			forget_closed,
+			reload,
+			rename,
+			save_copy,
+			close_others,
+			close_to_left,
+			close_to_right,
+			reveal,
+			move_to_trash,
 		])
 		.build(tauri::generate_context!())
 		.expect("BHNotepad failed to start")

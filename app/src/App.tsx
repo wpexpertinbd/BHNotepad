@@ -18,10 +18,14 @@ import * as ipc from "./ipc";
 import type { Buffer, Session } from "./ipc";
 import { Editor } from "./Editor";
 import { TabBar } from "./TabBar";
-import { FileMenu } from "./FileMenu";
+import { MenuBar, ACCEL, ALT, SHIFT, type Menu } from "./MenuBar";
+import * as cmd from "./editorCommands";
 import { FindDialog, type FindMode } from "./FindDialog";
 import { SELECTABLE, labelFor } from "./languages";
 import type { EditorView } from "@codemirror/view";
+
+/** Only used for naming the Trash in a message. */
+const ON_WINDOWS = navigator.platform.toLowerCase().startsWith("win");
 
 interface CaretInfo {
   line: number;
@@ -38,6 +42,8 @@ export function App() {
   const [view, setView] = useState<EditorView | null>(null);
   /** Set by the Editor; writes the live text through, bypassing the debounce. */
   const flushEditor = useRef<(() => Promise<void>) | null>(null);
+  /** Set by the Editor; drops a tab's parked document, used by Reload. */
+  const forgetState = useRef<((id: string) => void) | null>(null);
 
   const active: Buffer | null = useMemo(() => {
     if (!session || session.buffers.length === 0) return null;
@@ -150,6 +156,11 @@ export function App() {
       void failures.then((unlisten) => unlisten());
     };
   }, [fail]);
+
+  // Restore the zoom level this machine was last left at.
+  useEffect(() => {
+    cmd.applyFontSize(cmd.currentFontSize());
+  }, []);
 
   // Keep the window title showing the active tab, as Notepad++ does.
   useEffect(() => {
@@ -320,6 +331,125 @@ export function App() {
     }
   }, [session, fail, note]);
 
+  const handleRestoreClosed = useCallback(async () => {
+    try {
+      const opened = await ipc.restoreClosed();
+      if (!opened) {
+        note("No recently closed tab to restore");
+        return;
+      }
+      setTexts((all) => ({ ...all, [opened.id]: opened.text }));
+      setSession(opened.session);
+    } catch (error) {
+      fail("Could not restore that tab", error);
+    }
+  }, [fail, note]);
+
+  const handleReload = useCallback(async () => {
+    if (!active?.path) return;
+    try {
+      const opened = await ipc.reload(active.id);
+      setTexts((all) => ({ ...all, [opened.id]: opened.text }));
+      setSession(opened.session);
+      // The parked EditorState holds the old text, so it has to go or the
+      // reloaded file would not actually appear.
+      forgetState.current?.(opened.id);
+      note(`Reloaded ${active.title}`);
+    } catch (error) {
+      fail("Could not reload", error);
+    }
+  }, [active, fail, note]);
+
+  const handleRename = useCallback(async () => {
+    if (!active?.path) return;
+    try {
+      const picked = await saveDialog({ defaultPath: active.path, title: "Rename" });
+      if (!picked) return;
+      setSession(await ipc.rename(active.id, picked));
+      note("Renamed");
+    } catch (error) {
+      fail("Could not rename", error);
+    }
+  }, [active, fail, note]);
+
+  const handleSaveCopy = useCallback(async () => {
+    if (!active) return;
+    try {
+      await flushEditor.current?.();
+      const picked = await saveDialog({ defaultPath: active.path ?? active.title });
+      if (!picked) return;
+      await ipc.saveCopy(active.id, picked);
+      note("Copy saved");
+    } catch (error) {
+      fail("Could not save a copy", error);
+    }
+  }, [active, fail, note]);
+
+  const handleReveal = useCallback(async () => {
+    if (!active?.path) return;
+    try {
+      await ipc.reveal(active.path);
+    } catch (error) {
+      fail("Could not show it in the folder", error);
+    }
+  }, [active, fail]);
+
+  const handleTrash = useCallback(async () => {
+    if (!active?.path) return;
+    try {
+      const go = await confirmDialog(
+        `Move ${active.title} to the ${ON_WINDOWS ? "Recycle Bin" : "Trash"}?`,
+        { title: "Move to Trash", kind: "warning", okLabel: "Move" },
+      );
+      if (!go) return;
+      const updated = await ipc.moveToTrash(active.id);
+      setSession(updated);
+      setTexts((all) => {
+        const next = { ...all };
+        delete next[active.id];
+        return next;
+      });
+      note(`Moved ${active.title} to the ${ON_WINDOWS ? "Recycle Bin" : "Trash"}`);
+    } catch (error) {
+      fail("Could not move it", error);
+    }
+  }, [active, fail, note]);
+
+  const handleBulkClose = useCallback(
+    async (which: "others" | "left" | "right") => {
+      if (!active) return;
+      try {
+        const updated =
+          which === "others"
+            ? await ipc.closeOthers(active.id)
+            : which === "left"
+              ? await ipc.closeToLeft(active.id)
+              : await ipc.closeToRight(active.id);
+        setSession(updated);
+      } catch (error) {
+        fail("Could not close those tabs", error);
+      }
+    },
+    [active, fail],
+  );
+
+  const handleOpenRecent = useCallback(
+    async (path: string) => {
+      try {
+        const opened = await ipc.openPath(path);
+        setTexts((all) => ({ ...all, [opened.id]: opened.text }));
+        setSession(opened.session);
+      } catch (error) {
+        fail("Could not open that file", error);
+      }
+    },
+    [fail],
+  );
+
+  const goToLine = useCallback(() => {
+    if (view) cmd.editorGoToLine(view);
+  }, [view]);
+
   const handleSelect = useCallback(
     (index: number) => {
       setSession((current) => (current ? { ...current, active: index } : current));
@@ -430,6 +560,9 @@ export function App() {
     setFind,
     handleCloseAll,
     handleSaveAll,
+    handleRestoreClosed,
+    handleReload,
+    goToLine,
   });
   actions.current = {
     handleNew,
@@ -442,6 +575,9 @@ export function App() {
     setFind,
     handleCloseAll,
     handleSaveAll,
+    handleRestoreClosed,
+    handleReload,
+    goToLine,
   };
 
   useEffect(() => {
@@ -454,7 +590,32 @@ export function App() {
       switch (key) {
         case "t":
           event.preventDefault();
-          void current.handleNew();
+          if (event.shiftKey) {
+            void current.handleRestoreClosed();
+          } else {
+            void current.handleNew();
+          }
+          return;
+        case "r":
+          event.preventDefault();
+          void current.handleReload();
+          return;
+        case "g":
+          event.preventDefault();
+          current.goToLine();
+          return;
+        case "+":
+        case "=":
+          event.preventDefault();
+          cmd.zoomIn();
+          return;
+        case "-":
+          event.preventDefault();
+          cmd.zoomOut();
+          return;
+        case "0":
+          event.preventDefault();
+          cmd.zoomReset();
           return;
         case "n":
           // Notepad++ uses Ctrl+N for a new document; honour both.
@@ -466,11 +627,13 @@ export function App() {
           void current.handleOpen();
           return;
         case "s":
+          // Matches Notepad++: Alt is Save As, Shift is Save All. These were
+          // the other way round and that is daily muscle-memory friction.
           event.preventDefault();
-          if (event.altKey) {
+          if (event.shiftKey) {
             void current.handleSaveAll();
           } else {
-            void current.handleSave(event.shiftKey);
+            void current.handleSave(event.altKey);
           }
           return;
         case "f":
@@ -556,22 +719,160 @@ export function App() {
     return <div className="loading">Opening your tabs…</div>;
   }
 
+  // ── Menus ─────────────────────────────────────────────────────────────
+  //
+  // Shortcuts match Notepad++ where it has an opinion: Save As is accel+Alt+S
+  // and Save All is accel+Shift+S, which is the opposite of what this app
+  // shipped with. Twenty years of muscle memory beats my first guess.
+  const hasFile = Boolean(active?.path);
+  const withView = (run: (view: EditorView) => void) => () => {
+    if (view) run(view);
+  };
+  const withViewAsync = (run: (view: EditorView) => Promise<string | null>) => () => {
+    if (!view) return;
+    void run(view).then((problem) => problem && note(problem));
+  };
+
+  const menus: Menu[] = [
+    {
+      label: "File",
+      items: [
+        { label: "New tab", shortcut: `${ACCEL}T`, run: () => void handleNew() },
+        { label: "Open…", shortcut: `${ACCEL}O`, run: () => void handleOpen() },
+        {
+          label: "Open Recent",
+          submenu: (session?.recent ?? []).map((path) => ({
+            label: path,
+            run: () => void handleOpenRecent(path),
+          })),
+          emptyLabel: "No recent files",
+        },
+        {
+          label: "Restore Recent Closed File",
+          shortcut: `${ACCEL}${SHIFT}T`,
+          separated: true,
+          enabled: (session?.closed.length ?? 0) > 0,
+          run: () => void handleRestoreClosed(),
+        },
+        {
+          label: "Reload from Disk",
+          shortcut: `${ACCEL}R`,
+          enabled: hasFile,
+          run: () => void handleReload(),
+        },
+        { label: "Save", shortcut: `${ACCEL}S`, separated: true, run: () => void handleSave(false) },
+        { label: "Save As…", shortcut: `${ACCEL}${ALT}S`, run: () => void handleSave(true) },
+        { label: "Save a Copy As…", run: () => void handleSaveCopy() },
+        { label: "Save All…", shortcut: `${ACCEL}${SHIFT}S`, run: () => void handleSaveAll() },
+        { label: "Rename…", separated: true, enabled: hasFile, run: () => void handleRename() },
+        {
+          label: ON_WINDOWS ? "Show in Explorer" : "Show in Finder",
+          enabled: hasFile,
+          run: () => void handleReveal(),
+        },
+        {
+          label: ON_WINDOWS ? "Move to Recycle Bin" : "Move to Trash",
+          enabled: hasFile,
+          run: () => void handleTrash(),
+        },
+        {
+          label: "Close tab",
+          shortcut: `${ACCEL}W`,
+          separated: true,
+          run: () => active && void handleClose(active.id),
+        },
+        {
+          label: "Close Multiple Documents",
+          submenu: [
+            { label: "Close All but This", run: () => void handleBulkClose("others") },
+            { label: "Close to the Left", run: () => void handleBulkClose("left") },
+            { label: "Close to the Right", run: () => void handleBulkClose("right") },
+          ],
+        },
+        { label: "Close All…", shortcut: `${ACCEL}${SHIFT}W`, run: () => void handleCloseAll() },
+      ],
+    },
+    {
+      label: "Edit",
+      items: [
+        { label: "Undo", shortcut: `${ACCEL}Z`, run: withView(cmd.editorUndo) },
+        { label: "Redo", shortcut: `${ACCEL}${SHIFT}Z`, run: withView(cmd.editorRedo) },
+        { label: "Cut", shortcut: `${ACCEL}X`, separated: true, run: withViewAsync(cmd.editorCut) },
+        { label: "Copy", shortcut: `${ACCEL}C`, run: withViewAsync(cmd.editorCopy) },
+        { label: "Paste", shortcut: `${ACCEL}V`, run: withViewAsync(cmd.editorPaste) },
+        { label: "Select All", shortcut: `${ACCEL}A`, run: withView(cmd.editorSelectAll) },
+        {
+          label: "Duplicate Line",
+          shortcut: `${ACCEL}D`,
+          separated: true,
+          run: withView(cmd.editorDuplicateLine),
+        },
+        { label: "Delete Line", shortcut: `${ACCEL}${SHIFT}L`, run: withView(cmd.editorDeleteLine) },
+        { label: "Move Line Up", shortcut: `${ALT}↑`, run: withView(cmd.editorMoveLineUp) },
+        { label: "Move Line Down", shortcut: `${ALT}↓`, run: withView(cmd.editorMoveLineDown) },
+        { label: "Indent", shortcut: "Tab", separated: true, run: withView(cmd.editorIndent) },
+        { label: "Outdent", shortcut: `${SHIFT}Tab`, run: withView(cmd.editorOutdent) },
+        {
+          label: "Toggle Comment",
+          shortcut: `${ACCEL}/`,
+          run: withView(cmd.editorToggleComment),
+        },
+        { label: "UPPERCASE", separated: true, run: withView(cmd.editorUpperCase) },
+        { label: "lowercase", run: withView(cmd.editorLowerCase) },
+        { label: "Trim Trailing Space", run: withView(cmd.editorTrimTrailing) },
+      ],
+    },
+    {
+      label: "Search",
+      items: [
+        { label: "Find…", shortcut: `${ACCEL}F`, run: () => setFind("find") },
+        { label: "Replace…", shortcut: `${ACCEL}H`, run: () => setFind("replace") },
+        {
+          label: "Go to Line…",
+          shortcut: `${ACCEL}G`,
+          separated: true,
+          run: withView(cmd.editorGoToLine),
+        },
+      ],
+    },
+    {
+      label: "View",
+      items: [
+        { label: "Zoom In", shortcut: `${ACCEL}+`, run: () => cmd.zoomIn() },
+        { label: "Zoom Out", shortcut: `${ACCEL}-`, run: () => cmd.zoomOut() },
+        { label: "Reset Zoom", shortcut: `${ACCEL}0`, run: () => cmd.zoomReset() },
+        {
+          label: active?.word_wrap ? "Word Wrap ✓" : "Word Wrap",
+          shortcut: `${ACCEL}${SHIFT}Z`,
+          separated: true,
+          run: toggleWrap,
+        },
+        {
+          label: "Forget Closed Tabs",
+          separated: true,
+          enabled: (session?.closed.length ?? 0) > 0,
+          run: () => {
+            void ipc
+              .forgetClosed()
+              .then((updated) => {
+                setSession(updated);
+                note("Closed-tab history cleared");
+              })
+              .catch((error) => fail("Could not clear the history", error));
+          },
+        },
+      ],
+    },
+  ];
+
+
+
   const body = texts[active.id];
 
   return (
     <div className="app">
+      <MenuBar menus={menus} />
       <TabBar
-        leading={
-          <FileMenu
-            onNew={() => void handleNew()}
-            onOpen={() => void handleOpen()}
-            onSave={() => void handleSave(false)}
-            onSaveAs={() => void handleSave(true)}
-            onSaveAll={() => void handleSaveAll()}
-            onClose={() => active && void handleClose(active.id)}
-            onCloseAll={() => void handleCloseAll()}
-          />
-        }
         buffers={session.buffers}
         active={session.active}
         onSelect={handleSelect}
@@ -590,6 +891,7 @@ export function App() {
           onTextChanged={handleTextChanged}
           onPositionChanged={handlePositionChanged}
           registerFlush={(fn) => (flushEditor.current = fn)}
+          registerForget={(fn) => (forgetState.current = fn)}
           onCaretInfo={setCaret}
           onViewReady={setView}
         />

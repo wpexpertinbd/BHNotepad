@@ -16,7 +16,7 @@ pub mod settings;
 pub mod store;
 
 pub use language::detect as detect_language;
-pub use session::{Buffer, Session, SESSION_VERSION};
+pub use session::{Buffer, ClosedTab, Session, SESSION_VERSION};
 pub use settings::Settings;
 pub use store::{new_id, Store, StoreError};
 
@@ -251,6 +251,9 @@ impl Workspace {
 
         if let Some(index) = self.session.index_of_path(&path_string) {
             self.session.active = index;
+            // Still counts as using the file — without this, re-opening
+            // something already on screen left it sinking down the recent list.
+            self.session.remember_recent(&path_string);
             let buffer = self.session.buffers[index].clone();
             // `contents`, not the snapshot: a clean file-backed tab has none.
             // Any unsaved edits in that tab win over what is on disk, which is
@@ -274,6 +277,7 @@ impl Workspace {
         buffer.lossy = decoded.lossy;
         self.session.buffers.push(buffer);
         self.session.active = self.session.buffers.len() - 1;
+        self.session.remember_recent(&path_string);
         // Deliberately NO snapshot here. The file on disk is already the copy,
         // so writing one would mean a second 512 MB on open and 512 MB sitting
         // in the store for a file the user has not even edited. A snapshot
@@ -420,6 +424,7 @@ impl Workspace {
             buffer.language = language::detect(&target).to_string();
             buffer.dirty = false;
         }
+        self.session.remember_recent(&target);
         self.persist()?;
         Ok(target)
     }
@@ -433,24 +438,11 @@ impl Workspace {
     /// not a softening of it.
     pub fn close_all(&mut self) -> Result<usize, StoreError> {
         let ids: Vec<String> = self.session.buffers.iter().map(|b| b.id.clone()).collect();
-        let closed = ids.len();
-
-        self.session.buffers.clear();
-        self.session.active = 0;
-        if self.ensure_not_empty() {
-            let fresh = self.session.buffers[0].id.clone();
-            self.store.write_buffer(&fresh, "")?;
-        }
-        // Commit the new session BEFORE removing anything. Deleting first left
-        // a window in which session.json still named snapshots that no longer
-        // existed, and a crash there would reopen those tabs blank. This way
-        // the worst case is a snapshot nothing refers to — which the recovery
-        // pass turns back into a tab rather than discarding.
-        self.persist()?;
-
-        for id in &ids {
-            self.store.delete_buffer(id)?;
-        }
+        // Through `close`, so every tab lands in the closed history and Close
+        // All is recoverable one tab at a time rather than being final. The
+        // confirmation is about clearing the board, not about destroying the
+        // text for good.
+        let closed = self.close_each(ids)?;
         Ok(closed)
     }
 
@@ -467,8 +459,164 @@ impl Workspace {
             .collect()
     }
 
-    /// Closes a tab and deletes its snapshot. Never prompts — that is the point
-    /// of the app.
+    /// Reopens the most recently closed tab, text and all.
+    ///
+    /// Returns its id, or `None` when nothing has been closed.
+    pub fn restore_last_closed(&mut self) -> Result<Option<String>, StoreError> {
+        let Some(closed) = self.session.closed.first().cloned() else {
+            return Ok(None);
+        };
+        // An id that is somehow live again must not be clobbered.
+        if self.session.buffer(&closed.id).is_some() {
+            self.session.closed.remove(0);
+            return Ok(None);
+        }
+        self.session.closed.remove(0);
+
+        let restored_snapshot = if closed.has_snapshot {
+            self.store.revive_buffer(&closed.id)?
+        } else {
+            false
+        };
+
+        let mut buffer = match &closed.path {
+            Some(path) => Buffer::for_path(&closed.id, path),
+            None => Buffer::untitled(&closed.id, closed.title.clone()),
+        };
+        buffer.language = closed.language.clone();
+        buffer.eol = closed.eol.clone();
+        buffer.dirty = restored_snapshot;
+        if buffer.title.trim().is_empty() {
+            buffer.title = self.session.next_untitled_title();
+        }
+
+        self.session.buffers.push(buffer);
+        self.session.active = self.session.buffers.len() - 1;
+        self.persist()?;
+        Ok(Some(closed.id))
+    }
+
+    /// Discards the closed-tab history and every snapshot it holds.
+    pub fn forget_closed_history(&mut self) -> Result<usize, StoreError> {
+        let count = self.session.closed.len();
+        for closed in std::mem::take(&mut self.session.closed) {
+            self.store.forget_closed(&closed.id)?;
+        }
+        self.persist()?;
+        Ok(count)
+    }
+
+    /// Re-reads a tab from the file on disk, discarding unsaved edits.
+    pub fn reload(&mut self, id: &str) -> Result<String, StoreError> {
+        let Some(path) = self.session.buffer(id).and_then(|b| b.path.clone()) else {
+            return Err(StoreError::Io {
+                context: format!("tab {id} has no file to reload from"),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "no path"),
+            });
+        };
+        let bytes = read_capped(Path::new(&path), self.settings.max_open_bytes)?;
+        let decoded = store::decode_file(bytes);
+        // The snapshot is what made it dirty; dropping it makes the file
+        // authoritative again.
+        self.store.delete_buffer(id)?;
+        if let Some(buffer) = self.session.buffer_mut(id) {
+            buffer.dirty = false;
+            buffer.eol = decoded.eol.to_string();
+            buffer.lossy = decoded.lossy;
+        }
+        self.persist()?;
+        Ok(decoded.text)
+    }
+
+    /// Renames the file a tab is backed by, on disk and in the tab.
+    pub fn rename(&mut self, id: &str, new_path: &str) -> Result<(), StoreError> {
+        let Some(old) = self.session.buffer(id).and_then(|b| b.path.clone()) else {
+            return Err(StoreError::Io {
+                context: format!("tab {id} has never been saved, so there is nothing to rename"),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "no path"),
+            });
+        };
+        if Path::new(new_path).exists() {
+            return Err(StoreError::Io {
+                context: format!("{new_path} already exists"),
+                source: std::io::Error::new(std::io::ErrorKind::AlreadyExists, "exists"),
+            });
+        }
+        fs::rename(&old, new_path).map_err(|source| StoreError::Io {
+            context: format!("renaming {old} to {new_path}"),
+            source,
+        })?;
+        if let Some(buffer) = self.session.buffer_mut(id) {
+            buffer.path = Some(new_path.to_string());
+            buffer.title = language::base_name(new_path).to_string();
+            buffer.language = language::detect(new_path).to_string();
+        }
+        self.session.remember_recent(new_path);
+        self.persist()?;
+        Ok(())
+    }
+
+    /// Writes a tab's text somewhere else without the tab adopting that path.
+    pub fn save_copy(&self, id: &str, path: &str) -> Result<(), StoreError> {
+        let Some(buffer) = self.session.buffer(id) else {
+            return Err(StoreError::Io {
+                context: format!("tab {id} is not open"),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such tab"),
+            });
+        };
+        let text = self.contents(buffer)?;
+        write_user_file(
+            Path::new(path),
+            store::encode_eol(&text, &buffer.eol).as_bytes(),
+        )
+    }
+
+    /// Closes every tab except one. Returns how many were closed.
+    pub fn close_others(&mut self, keep: &str) -> Result<usize, StoreError> {
+        let doomed: Vec<String> = self
+            .session
+            .buffers
+            .iter()
+            .filter(|b| b.id != keep)
+            .map(|b| b.id.clone())
+            .collect();
+        self.close_each(doomed)
+    }
+
+    /// Closes every tab to the left of one.
+    pub fn close_to_left(&mut self, from: &str) -> Result<usize, StoreError> {
+        let Some(index) = self.session.index_of(from) else {
+            return Ok(0);
+        };
+        let doomed: Vec<String> = self.session.buffers[..index]
+            .iter()
+            .map(|b| b.id.clone())
+            .collect();
+        self.close_each(doomed)
+    }
+
+    /// Closes every tab to the right of one.
+    pub fn close_to_right(&mut self, from: &str) -> Result<usize, StoreError> {
+        let Some(index) = self.session.index_of(from) else {
+            return Ok(0);
+        };
+        let doomed: Vec<String> = self.session.buffers[index + 1..]
+            .iter()
+            .map(|b| b.id.clone())
+            .collect();
+        self.close_each(doomed)
+    }
+
+    fn close_each(&mut self, ids: Vec<String>) -> Result<usize, StoreError> {
+        let mut closed = 0;
+        for id in ids {
+            self.close(&id)?;
+            closed += 1;
+        }
+        Ok(closed)
+    }
+
+    /// Closes a tab. Never prompts — that is the point of the app.
     ///
     /// Closing the last tab leaves a fresh empty one, so there is always
     /// somewhere to type.
@@ -476,8 +624,28 @@ impl Workspace {
         let Some(index) = self.session.index_of(id) else {
             return Ok(());
         };
-        self.session.buffers.remove(index);
-        self.store.delete_buffer(id)?;
+        let buffer = self.session.buffers.remove(index);
+        // Retire rather than delete, so Restore Recent Closed File has
+        // something to bring back. A clean file-backed tab has no snapshot to
+        // move; reopening it re-reads the file.
+        let has_snapshot = self.store.retire_buffer(id)?;
+        self.session.closed.insert(
+            0,
+            ClosedTab {
+                id: buffer.id.clone(),
+                title: buffer.title.clone(),
+                path: buffer.path.clone(),
+                language: buffer.language.clone(),
+                eol: buffer.eol.clone(),
+                has_snapshot,
+            },
+        );
+        // Anything beyond the bound is forgotten properly, text and all.
+        while self.session.closed.len() > session::CLOSED_HISTORY {
+            if let Some(evicted) = self.session.closed.pop() {
+                self.store.forget_closed(&evicted.id)?;
+            }
+        }
 
         if self.session.active >= self.session.buffers.len() {
             self.session.active = self.session.buffers.len().saturating_sub(1);
@@ -1027,6 +1195,279 @@ mod tests {
 
         workspace.update_text(&first, "secret").unwrap();
         assert_eq!(workspace.store().read_buffer(&first).unwrap(), "");
+    }
+
+    // ── Restore Recent Closed File ────────────────────────────────────────
+
+    #[test]
+    fn a_closed_scratch_tab_can_be_brought_back_with_its_text() {
+        let (_dir, mut workspace) = workspace();
+        let id = workspace.new_scratch().unwrap();
+        workspace
+            .update_text(&id, "the note I closed by accident")
+            .unwrap();
+        workspace.close(&id).unwrap();
+        assert!(workspace.session().buffer(&id).is_none());
+
+        let restored = workspace.restore_last_closed().unwrap().unwrap();
+
+        assert_eq!(restored, id);
+        assert_eq!(
+            workspace.text(&id).unwrap(),
+            "the note I closed by accident"
+        );
+        assert!(workspace.session().buffer(&id).unwrap().dirty);
+    }
+
+    #[test]
+    fn a_closed_file_tab_comes_back_reading_the_file() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("notes.sql");
+        fs::write(&file, "select 1;\n").unwrap();
+        let (id, _) = workspace.open_path(&file).unwrap();
+        workspace.close(&id).unwrap();
+
+        let restored = workspace.restore_last_closed().unwrap().unwrap();
+        assert_eq!(restored, id);
+        let buffer = workspace.session().buffer(&id).unwrap();
+        let canonical = fs::canonicalize(&file).unwrap();
+        assert_eq!(
+            buffer.path.as_deref(),
+            Some(canonical.to_string_lossy().as_ref())
+        );
+        assert_eq!(buffer.language, "sql");
+        assert!(
+            !buffer.dirty,
+            "an unedited file is not dirty when it comes back"
+        );
+        assert_eq!(workspace.text(&id).unwrap(), "select 1;\n");
+    }
+
+    #[test]
+    fn tabs_come_back_in_the_order_they_were_closed() {
+        let (_dir, mut workspace) = workspace();
+        let a = workspace.new_scratch().unwrap();
+        workspace.update_text(&a, "first closed").unwrap();
+        let b = workspace.new_scratch().unwrap();
+        workspace.update_text(&b, "second closed").unwrap();
+        workspace.close(&a).unwrap();
+        workspace.close(&b).unwrap();
+
+        assert_eq!(workspace.restore_last_closed().unwrap().unwrap(), b);
+        assert_eq!(workspace.restore_last_closed().unwrap().unwrap(), a);
+        assert!(workspace.restore_last_closed().unwrap().is_none());
+    }
+
+    #[test]
+    fn the_closed_history_is_bounded_and_evicted_text_is_really_gone() {
+        let (_dir, mut workspace) = workspace();
+        let mut ids = Vec::new();
+        for i in 0..(session::CLOSED_HISTORY + 3) {
+            let id = workspace.new_scratch().unwrap();
+            workspace.update_text(&id, &format!("note {i}")).unwrap();
+            workspace.close(&id).unwrap();
+            ids.push(id);
+        }
+        assert_eq!(workspace.session().closed.len(), session::CLOSED_HISTORY);
+
+        // The oldest three were pushed out; their text must not linger.
+        for id in &ids[..3] {
+            assert_eq!(workspace.store().read_closed(id).unwrap(), "");
+        }
+        assert_eq!(
+            workspace.store().read_closed(ids.last().unwrap()).unwrap(),
+            format!("note {}", session::CLOSED_HISTORY + 2)
+        );
+    }
+
+    #[test]
+    fn close_all_is_recoverable_one_tab_at_a_time() {
+        let (_dir, mut workspace) = workspace();
+        let first = workspace.session().buffers[0].id.clone();
+        workspace.update_text(&first, "one").unwrap();
+        let second = workspace.new_scratch().unwrap();
+        workspace.update_text(&second, "two").unwrap();
+
+        workspace.close_all().unwrap();
+        assert_eq!(workspace.session().buffers.len(), 1);
+
+        workspace.restore_last_closed().unwrap();
+        assert_eq!(workspace.text(&second).unwrap(), "two");
+        workspace.restore_last_closed().unwrap();
+        assert_eq!(workspace.text(&first).unwrap(), "one");
+    }
+
+    #[test]
+    fn forgetting_the_history_removes_the_text_too() {
+        let (_dir, mut workspace) = workspace();
+        let id = workspace.new_scratch().unwrap();
+        workspace.update_text(&id, "a secret I closed").unwrap();
+        workspace.close(&id).unwrap();
+        assert_eq!(
+            workspace.store().read_closed(&id).unwrap(),
+            "a secret I closed"
+        );
+
+        assert_eq!(workspace.forget_closed_history().unwrap(), 1);
+        assert_eq!(workspace.store().read_closed(&id).unwrap(), "");
+        assert!(workspace.restore_last_closed().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_restored_tab_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let id;
+        {
+            let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
+            id = workspace.new_scratch().unwrap();
+            workspace.update_text(&id, "closed then restored").unwrap();
+            workspace.close(&id).unwrap();
+            workspace.restore_last_closed().unwrap();
+        }
+        let (restored, _) = Workspace::open(dir.path()).unwrap();
+        assert_eq!(restored.text(&id).unwrap(), "closed then restored");
+    }
+
+    // ── Reload, rename, save a copy, bulk closes ─────────────────────────
+
+    #[test]
+    fn reload_discards_unsaved_edits_and_takes_what_is_on_disk() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("config.conf");
+        fs::write(&file, "original\n").unwrap();
+        let (id, _) = workspace.open_path(&file).unwrap();
+        workspace.update_text(&id, "my unsaved edit\n").unwrap();
+        fs::write(&file, "changed by another program\n").unwrap();
+
+        let text = workspace.reload(&id).unwrap();
+
+        assert_eq!(text, "changed by another program\n");
+        assert_eq!(workspace.text(&id).unwrap(), "changed by another program\n");
+        assert!(!workspace.session().buffer(&id).unwrap().dirty);
+    }
+
+    #[test]
+    fn reload_refuses_a_tab_with_no_file() {
+        let (_dir, mut workspace) = workspace();
+        let id = workspace.session().buffers[0].id.clone();
+        assert!(workspace.reload(&id).is_err());
+    }
+
+    #[test]
+    fn rename_moves_the_file_and_relabels_the_tab() {
+        let (dir, mut workspace) = workspace();
+        let from = dir.path().join("old_name.txt");
+        fs::write(&from, "body").unwrap();
+        let (id, _) = workspace.open_path(&from).unwrap();
+
+        let to = dir.path().join("new_name.sql");
+        workspace.rename(&id, &to.to_string_lossy()).unwrap();
+
+        assert!(!from.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "body");
+        let buffer = workspace.session().buffer(&id).unwrap();
+        assert_eq!(buffer.title, "new_name.sql");
+        assert_eq!(buffer.language, "sql");
+    }
+
+    #[test]
+    fn rename_refuses_to_overwrite_an_existing_file() {
+        let (dir, mut workspace) = workspace();
+        let from = dir.path().join("a.txt");
+        let occupied = dir.path().join("b.txt");
+        fs::write(&from, "mine").unwrap();
+        fs::write(&occupied, "someone else's").unwrap();
+        let (id, _) = workspace.open_path(&from).unwrap();
+
+        assert!(workspace.rename(&id, &occupied.to_string_lossy()).is_err());
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "someone else's");
+        assert!(from.exists(), "and the original is still where it was");
+    }
+
+    #[test]
+    fn save_a_copy_writes_elsewhere_without_moving_the_tab() {
+        let (dir, mut workspace) = workspace();
+        let original = dir.path().join("live.txt");
+        fs::write(&original, "first").unwrap();
+        let (id, _) = workspace.open_path(&original).unwrap();
+        workspace.update_text(&id, "edited, not saved").unwrap();
+
+        let copy = dir.path().join("copy.txt");
+        workspace.save_copy(&id, &copy.to_string_lossy()).unwrap();
+
+        assert_eq!(fs::read_to_string(&copy).unwrap(), "edited, not saved");
+        assert_eq!(
+            fs::read_to_string(&original).unwrap(),
+            "first",
+            "original untouched"
+        );
+        let buffer = workspace.session().buffer(&id).unwrap();
+        let canonical = fs::canonicalize(&original).unwrap();
+        assert_eq!(
+            buffer.path.as_deref(),
+            Some(canonical.to_string_lossy().as_ref())
+        );
+        assert!(buffer.dirty, "and the tab is still unsaved");
+    }
+
+    #[test]
+    fn close_others_left_and_right_close_the_right_tabs() {
+        let (_dir, mut workspace) = workspace();
+        let a = workspace.session().buffers[0].id.clone();
+        let b = workspace.new_scratch().unwrap();
+        let c = workspace.new_scratch().unwrap();
+        let d = workspace.new_scratch().unwrap();
+
+        assert_eq!(workspace.close_to_left(&c).unwrap(), 2);
+        let left: Vec<String> = workspace
+            .session()
+            .buffers
+            .iter()
+            .map(|x| x.id.clone())
+            .collect();
+        assert_eq!(left, vec![c.clone(), d.clone()]);
+        assert!(!left.contains(&a) && !left.contains(&b));
+
+        assert_eq!(workspace.close_to_right(&c).unwrap(), 1);
+        assert_eq!(workspace.session().buffers.len(), 1);
+
+        let e = workspace.new_scratch().unwrap();
+        workspace.new_scratch().unwrap();
+        assert_eq!(workspace.close_others(&e).unwrap(), 2);
+        assert_eq!(workspace.session().buffers.len(), 1);
+        assert_eq!(workspace.session().buffers[0].id, e);
+    }
+
+    // ── Recent files ──────────────────────────────────────────────────────
+
+    #[test]
+    fn opening_and_saving_build_the_recent_list_newest_first() {
+        let (dir, mut workspace) = workspace();
+        for name in ["one.txt", "two.txt", "three.txt"] {
+            let path = dir.path().join(name);
+            fs::write(&path, "x").unwrap();
+            workspace.open_path(&path).unwrap();
+        }
+        let recent = &workspace.session().recent;
+        assert!(recent[0].ends_with("three.txt"), "newest first: {recent:?}");
+        assert!(recent[2].ends_with("one.txt"));
+
+        // Re-opening moves it to the front rather than duplicating it.
+        workspace.open_path(dir.path().join("one.txt")).unwrap();
+        let recent = &workspace.session().recent;
+        assert!(recent[0].ends_with("one.txt"));
+        assert_eq!(recent.len(), 3, "no duplicate: {recent:?}");
+    }
+
+    #[test]
+    fn the_recent_list_is_bounded() {
+        let (dir, mut workspace) = workspace();
+        for i in 0..(session::RECENT_FILES + 5) {
+            let path = dir.path().join(format!("f{i}.txt"));
+            fs::write(&path, "x").unwrap();
+            workspace.open_path(&path).unwrap();
+        }
+        assert_eq!(workspace.session().recent.len(), session::RECENT_FILES);
     }
 
     #[test]

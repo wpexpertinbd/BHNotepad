@@ -66,6 +66,12 @@ and checks all six tabs and their text came back.
   in Finder or Explorer — BHNotepad registers itself for about 70 text and source extensions.
 - **Line endings are preserved**: a Windows file is written back with CRLF, so a one-word change
   does not show up as a diff touching every line.
+- **A menu bar** — File, Edit, Search, View — with the operations a Notepad++ user reaches for:
+  Open Recent, Reload from Disk, Rename, Save a Copy As, Show in Finder/Explorer, Move to Trash,
+  Close All but This / to the Left / to the Right, and the line operations (duplicate, delete,
+  move, comment, case, trim trailing space).
+- **Restore Recent Closed File** (`Cmd/Ctrl+Shift+T`) brings back a tab you closed, text and all.
+  Close All is recoverable the same way, one tab at a time.
 - **Save All** walks your unsaved tabs one at a time, asking where each should go.
 - **Close All** clears the board behind a single confirmation that tells you how many tabs have
   never been saved.
@@ -106,10 +112,19 @@ Click **More info → Run anyway**. The installer is per-user and needs no admin
 |---|---|
 | New tab | `Cmd/Ctrl + T` or `+ N` |
 | Open file | `Cmd/Ctrl + O` |
-| Save / Save As | `Cmd/Ctrl + S` / `+ Shift + S` |
+| Save | `Cmd/Ctrl + S` |
+| Save As | `Cmd/Ctrl + Alt + S` |
+| Save all tabs | `Cmd/Ctrl + Shift + S` |
+| Reload from disk | `Cmd/Ctrl + R` |
 | Close tab | `Cmd/Ctrl + W` |
 | Close all tabs | `Cmd/Ctrl + Shift + W` |
-| Save all tabs | `Cmd/Ctrl + Alt + S` |
+| Restore last closed tab | `Cmd/Ctrl + Shift + T` |
+| Go to line | `Cmd/Ctrl + G` |
+| Duplicate line | `Cmd/Ctrl + D` |
+| Delete line | `Cmd/Ctrl + Shift + L` |
+| Move line up / down | `Alt + ↑` / `Alt + ↓` |
+| Toggle comment | `Cmd/Ctrl + /` |
+| Zoom in / out / reset | `Cmd/Ctrl + +` / `-` / `0` |
 | Find / Replace | `Cmd/Ctrl + F` / `+ H` |
 | Next / previous tab | `Ctrl + Tab` / `Ctrl + Shift + Tab` |
 | Toggle word wrap | `Cmd/Ctrl + Shift + Z` |
