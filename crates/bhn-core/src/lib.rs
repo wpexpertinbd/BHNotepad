@@ -64,9 +64,28 @@ impl Workspace {
         let store = Store::new(root.as_ref())?;
         let (session, note) = store.load_session();
         let mut workspace = Self { store, session };
-        // Drop snapshots for tabs that are no longer open, so the store does
-        // not grow for the life of the install.
-        workspace.store.prune_orphans(&workspace.session);
+
+        // ⚠️ Do NOT simply prune here. `load_session` yields an empty session
+        // for a file that is corrupt OR missing, and pruning against an empty
+        // session deletes every snapshot in the store — which is to say, all
+        // of the user's scratch notes, precisely when something has already
+        // gone wrong. Closing a tab deletes its snapshot explicitly, so in
+        // normal operation there are no orphans at all; one existing means a
+        // crash or outside interference, and the text in it is worth more
+        // than the tidiness of the directory.
+        let recovered = workspace.recover_orphans()?;
+        let note = match (note, recovered) {
+            (existing, 0) => existing,
+            (Some(existing), n) => Some(format!(
+                "{existing}; recovered {n} unreferenced {} as tabs",
+                if n == 1 { "note" } else { "notes" }
+            )),
+            (None, n) => Some(format!(
+                "Recovered {n} unreferenced {} as tabs",
+                if n == 1 { "note" } else { "notes" }
+            )),
+        };
+
         if workspace.ensure_not_empty() {
             // A brand new tab exists only in memory until this runs. Writing it
             // now means even a force-kill before the first keystroke still
@@ -86,6 +105,63 @@ impl Workspace {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Turns snapshots the session does not reference back into tabs.
+    ///
+    /// Replaces the old "prune orphans" behaviour, which deleted them. That
+    /// was safe only while `session.json` could be trusted — and it is exactly
+    /// when it cannot (corrupt, truncated, deleted) that the snapshots are the
+    /// only surviving copy of the user's notes. Recovering is the behaviour
+    /// that matches what this app promises.
+    ///
+    /// Empty snapshots carry nothing, so those are deleted rather than
+    /// restored as blank tabs; that is what keeps the directory from growing
+    /// after a crash mid-`new_scratch`.
+    ///
+    /// Returns how many tabs were recovered.
+    fn recover_orphans(&mut self) -> Result<usize, StoreError> {
+        let mut orphans: Vec<String> = Vec::new();
+        if let Ok(entries) = fs::read_dir(self.store.buffers_dir()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+                    continue;
+                }
+                let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                // The id becomes a path again on every read and write, so a
+                // file someone dropped in here with an unusable name is left
+                // alone rather than adopted.
+                if !session::is_safe_id(id) || self.session.buffer(id).is_some() {
+                    continue;
+                }
+                orphans.push(id.to_string());
+            }
+        }
+        // Deterministic order, so a recovery looks the same twice running.
+        orphans.sort();
+
+        let mut recovered = 0;
+        for id in orphans {
+            let text = self.store.read_buffer(&id)?;
+            if text.is_empty() {
+                self.store.delete_buffer(&id)?;
+                continue;
+            }
+            let title = self.session.next_untitled_title();
+            let mut buffer = Buffer::untitled(&id, title);
+            // It is unsaved text by definition — show it as such.
+            buffer.dirty = true;
+            self.session.buffers.push(buffer);
+            recovered += 1;
+        }
+
+        if recovered > 0 {
+            self.persist()?;
+        }
+        Ok(recovered)
     }
 
     /// Guarantees at least one tab, so the window is never blank on launch.
@@ -129,7 +205,13 @@ impl Workspace {
     ///
     /// Returns the tab id and its text.
     pub fn open_path(&mut self, path: impl AsRef<Path>) -> Result<(String, String), StoreError> {
-        let path_ref = path.as_ref();
+        // Resolve before anything else. A path stored as given would mean
+        // `notes.txt` reopening against a different directory after a restart
+        // and Save overwriting the wrong file, and `/tmp/a.txt` and
+        // `/tmp/./a.txt` opening as two tabs whose snapshots then compete.
+        let resolved =
+            fs::canonicalize(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_path_buf());
+        let path_ref = resolved.as_path();
         let path_string = path_ref.to_string_lossy().into_owned();
 
         if let Some(index) = self.session.index_of_path(&path_string) {
@@ -140,42 +222,19 @@ impl Workspace {
             return Ok((id, text));
         }
 
-        // Check what this is before reading it. Now that files can be opened
-        // by double-clicking, `fs::read` on its own would happily try to pull
-        // a 5 GB log — or a character device like /dev/zero, which never
-        // ends — into memory and then across to the editor.
-        let meta = fs::metadata(path_ref).map_err(|source| StoreError::Io {
-            context: format!("opening {}", path_ref.display()),
-            source,
-        })?;
-        if !meta.is_file() {
-            return Err(StoreError::Io {
-                context: format!("{} is not a regular file", path_ref.display()),
-                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
-            });
-        }
-        if meta.len() > MAX_OPEN_BYTES {
-            return Err(StoreError::Io {
-                context: format!(
-                    "{} is {} and the limit is {}",
-                    path_ref.display(),
-                    human_bytes(meta.len()),
-                    human_bytes(MAX_OPEN_BYTES)
-                ),
-                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "file too large"),
-            });
-        }
-
-        let bytes = fs::read(path_ref).map_err(|source| StoreError::Io {
-            context: format!("opening {}", path_ref.display()),
-            source,
-        })?;
-        let text = store::decode_utf8_lossy(bytes);
+        // Read through ONE handle and re-check its metadata from that handle.
+        // Checking the path and then reading the path resolves it twice, so a
+        // file that is swapped for a symlink to /dev/zero in between would be
+        // read unbounded despite having passed the check.
+        let bytes = read_capped(path_ref, MAX_OPEN_BYTES)?;
+        let decoded = store::decode_file(bytes);
+        let text = decoded.text;
 
         let id = new_id();
-        self.session
-            .buffers
-            .push(Buffer::for_path(&id, &path_string));
+        let mut buffer = Buffer::for_path(&id, &path_string);
+        buffer.eol = decoded.eol.to_string();
+        buffer.lossy = decoded.lossy;
+        self.session.buffers.push(buffer);
         self.session.active = self.session.buffers.len() - 1;
         self.store.write_buffer(&id, &text)?;
         self.persist()?;
@@ -274,11 +333,35 @@ impl Workspace {
             },
         };
 
+        // Refuse to overwrite a file we could not read properly. The bytes we
+        // did not understand became replacement characters, and writing those
+        // back would destroy them for good. Saving ELSEWHERE is still allowed,
+        // so the user can rescue what we did manage to read.
+        let buffer = self.session.buffer(id);
+        let lossy = buffer.map(|b| b.lossy).unwrap_or(false);
+        let original = buffer.and_then(|b| b.path.clone());
+        if lossy && original.as_deref() == Some(target.as_str()) {
+            return Err(StoreError::Io {
+                context: format!(
+                    "{} is not UTF-8 and parts of it could not be read, so saving over it                      would destroy them — use Save As to write a copy instead",
+                    target
+                ),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidData, "lossy decode"),
+            });
+        }
+
+        let eol = buffer
+            .map(|b| b.eol.clone())
+            .unwrap_or_else(|| "lf".to_string());
         let text = self.store.read_buffer(id)?;
+        // Put the file's own line endings back. The editor normalises to LF,
+        // so without this a one-word change to a Windows file rewrites every
+        // line in it.
+        let on_disk = store::encode_eol(&text, &eol);
         // The user's own file gets the same atomic treatment as the store: an
         // interrupted save must not truncate a file they already had.
         let target_path = Path::new(&target);
-        write_user_file(target_path, text.as_bytes())?;
+        write_user_file(target_path, on_disk.as_bytes())?;
 
         if let Some(buffer) = self.session.buffer_mut(id) {
             buffer.path = Some(target.clone());
@@ -300,17 +383,23 @@ impl Workspace {
     pub fn close_all(&mut self) -> Result<usize, StoreError> {
         let ids: Vec<String> = self.session.buffers.iter().map(|b| b.id.clone()).collect();
         let closed = ids.len();
-        for id in &ids {
-            self.store.delete_buffer(id)?;
-        }
+
         self.session.buffers.clear();
         self.session.active = 0;
-
         if self.ensure_not_empty() {
             let fresh = self.session.buffers[0].id.clone();
             self.store.write_buffer(&fresh, "")?;
         }
+        // Commit the new session BEFORE removing anything. Deleting first left
+        // a window in which session.json still named snapshots that no longer
+        // existed, and a crash there would reopen those tabs blank. This way
+        // the worst case is a snapshot nothing refers to — which the recovery
+        // pass turns back into a tab rather than discarding.
         self.persist()?;
+
+        for id in &ids {
+            self.store.delete_buffer(id)?;
+        }
         Ok(closed)
     }
 
@@ -351,43 +440,183 @@ impl Workspace {
     }
 }
 
-/// Atomic write for a file the user chose, falling back to a direct write when
-/// the directory will not take a temporary file.
+/// Atomic write for a file the user chose.
 ///
-/// A rename cannot cross a filesystem boundary and may be refused on some
-/// network or synced folders; for the user's own Save, completing the write is
-/// more important than the atomicity guarantee we insist on for the store.
+/// ⚠️ There is deliberately **no fall-back to a direct `fs::write`**. The
+/// earlier version did that whenever anything went wrong, which meant a full
+/// disk — the very case where the temporary write fails — ended by truncating
+/// the user's existing file and then failing anyway. Destroying the old
+/// contents is strictly worse than refusing to save. The temporary file is
+/// created in the destination's own directory, so a rename can never need to
+/// cross a filesystem and the fall-back bought nothing.
+///
+/// Permissions are decided **before** the data is written, not after: creating
+/// with the umask default and chmod-ing afterwards leaves the contents of a
+/// deliberately private file sitting in a world-readable temporary file, and a
+/// crash in that window leaves it there.
 fn write_user_file(path: &Path, data: &[u8]) -> Result<(), StoreError> {
+    use std::io::Write as _;
+
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = parent.join(format!(".bhn-save-{}.tmp", new_id()));
 
-    let attempt = (|| -> std::io::Result<()> {
-        use std::io::Write as _;
-        let mut file = fs::File::create(&tmp)?;
+    // What the destination already is, if it exists. A rename takes the
+    // temporary file's permissions, so they have to match from the start.
+    let existing = fs::metadata(path).ok().map(|m| m.permissions());
+
+    let write = (|| -> std::io::Result<()> {
+        let mut file = match &existing {
+            // Replacing a file: create the temp with the destination's mode so
+            // a private file is never briefly readable by anyone else.
+            Some(permissions) => open_with_permissions(&tmp, permissions)?,
+            // A new file: the umask decides, as it would for any program.
+            None => fs::File::create(&tmp)?,
+        };
         file.write_all(data)?;
         file.sync_all()?;
         Ok(())
     })();
 
-    // A rename replaces the destination's permissions with the temporary
-    // file's. Without this, re-saving a file the user had deliberately made
-    // private (0600) would silently widen it to whatever the umask gives,
-    // which is usually world-readable.
-    if attempt.is_ok() {
-        if let Ok(existing) = fs::metadata(path) {
-            let _ = fs::set_permissions(&tmp, existing.permissions());
+    if let Err(source) = write {
+        let _ = fs::remove_file(&tmp);
+        return Err(StoreError::Io {
+            context: format!("saving {}", path.display()),
+            source,
+        });
+    }
+
+    if let Err(source) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(StoreError::Io {
+            context: format!("saving {}", path.display()),
+            source,
+        });
+    }
+    sync_parent_dir(path);
+    Ok(())
+}
+
+/// Reads a file, refusing anything that is not a regular file or is larger
+/// than `limit`.
+///
+/// The checks are made against the open handle, not the path, so the file
+/// cannot be swapped for something else between the check and the read. The
+/// read itself is capped at `limit + 1` bytes, which also catches a file that
+/// grows while it is being read.
+fn read_capped(path: &Path, limit: u64) -> Result<Vec<u8>, StoreError> {
+    use std::io::Read as _;
+
+    let fail = |context: String, kind: std::io::ErrorKind, message: &str| StoreError::Io {
+        context,
+        source: std::io::Error::new(kind, message.to_string()),
+    };
+
+    // A path-level check first, so a FIFO is rejected before `open` blocks on
+    // it waiting for a writer. The handle checks below are what actually
+    // close the race.
+    let probe = fs::metadata(path).map_err(|source| StoreError::Io {
+        context: format!("opening {}", path.display()),
+        source,
+    })?;
+    if !probe.is_file() {
+        return Err(fail(
+            format!("{} is not a regular file", path.display()),
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+
+    let file = fs::File::open(path).map_err(|source| StoreError::Io {
+        context: format!("opening {}", path.display()),
+        source,
+    })?;
+    let meta = file.metadata().map_err(|source| StoreError::Io {
+        context: format!("opening {}", path.display()),
+        source,
+    })?;
+    if !meta.is_file() {
+        return Err(fail(
+            format!("{} is not a regular file", path.display()),
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    if meta.len() > limit {
+        return Err(fail(
+            format!(
+                "{} is {} and the limit is {}",
+                path.display(),
+                human_bytes(meta.len()),
+                human_bytes(limit)
+            ),
+            std::io::ErrorKind::InvalidInput,
+            "file too large",
+        ));
+    }
+
+    let mut bytes = Vec::with_capacity(meta.len() as usize + 1);
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| StoreError::Io {
+            context: format!("reading {}", path.display()),
+            source,
+        })?;
+
+    if bytes.len() as u64 > limit {
+        return Err(fail(
+            format!(
+                "{} grew past the {} limit while it was being read",
+                path.display(),
+                human_bytes(limit)
+            ),
+            std::io::ErrorKind::InvalidInput,
+            "file too large",
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Flushes the directory entry itself, so the rename survives a power loss.
+///
+/// `sync_all` on the file commits its contents; it says nothing about the
+/// directory entry that names it. Without this, a real power cut (as opposed
+/// to the process being killed, which is all the test suite can simulate) can
+/// leave the rename unrecorded. Best effort: not every filesystem supports it,
+/// and failing to sync a directory is not a reason to report the save failed.
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
         }
     }
-
-    if attempt.is_ok() && fs::rename(&tmp, path).is_ok() {
-        return Ok(());
+    #[cfg(not(unix))]
+    {
+        // Windows does not allow opening a directory as a file this way.
+        let _ = path;
     }
-    let _ = fs::remove_file(&tmp);
+}
 
-    fs::write(path, data).map_err(|source| StoreError::Io {
-        context: format!("saving {}", path.display()),
-        source,
-    })
+/// Creates a file with exactly the given permissions from the outset.
+fn open_with_permissions(path: &Path, permissions: &fs::Permissions) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(permissions.mode() & 0o777)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows permissions are ACLs, which `fs::Permissions` does not carry
+        // beyond the read-only flag; the containing directory governs the rest.
+        let file = fs::File::create(path)?;
+        let _ = fs::set_permissions(path, permissions.clone());
+        Ok(file)
+    }
 }
 
 #[cfg(test)]
@@ -933,6 +1162,132 @@ mod tests {
     }
 
     #[test]
+    fn a_windows_file_keeps_its_line_endings_through_a_save() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("windows.txt");
+        fs::write(&file, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+
+        let (id, text) = workspace.open_path(&file).unwrap();
+        assert_eq!(text, "alpha\nbeta\ngamma\n", "normalised for the editor");
+        assert_eq!(workspace.session().buffer(&id).unwrap().eol, "crlf");
+
+        workspace.update_text(&id, "alpha\nBETA\ngamma\n").unwrap();
+        workspace.save(&id, None).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "alpha\r\nBETA\r\ngamma\r\n",
+            "a one-word change must not rewrite every line ending"
+        );
+    }
+
+    #[test]
+    fn a_unix_file_is_not_given_windows_line_endings() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("unix.txt");
+        fs::write(&file, "one\ntwo\n").unwrap();
+        let (id, _) = workspace.open_path(&file).unwrap();
+        assert_eq!(workspace.session().buffer(&id).unwrap().eol, "lf");
+        workspace.update_text(&id, "one\ntwo\nthree\n").unwrap();
+        workspace.save(&id, None).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn a_file_that_could_not_be_decoded_is_not_overwritten() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("latin1.txt");
+        // 0xFF is not valid UTF-8; decoding replaces it and the byte is lost.
+        fs::write(&file, b"caf\xE9 nota\xFFion").unwrap();
+
+        let (id, _) = workspace.open_path(&file).unwrap();
+        assert!(workspace.session().buffer(&id).unwrap().lossy);
+
+        let error = workspace.save(&id, None).unwrap_err().to_string();
+        assert!(
+            error.contains("Save As"),
+            "the message should say what to do: {error}"
+        );
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            b"caf\xE9 nota\xFFion",
+            "the original bytes must be untouched"
+        );
+
+        // Save As elsewhere is allowed — that is how the user rescues it.
+        let copy = dir.path().join("rescued.txt");
+        assert!(workspace.save(&id, Some(&copy.to_string_lossy())).is_ok());
+        assert!(copy.exists());
+    }
+
+    #[test]
+    fn the_same_file_reached_by_two_spellings_opens_one_tab() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("once.txt");
+        fs::write(&file, "body").unwrap();
+        let awkward = dir.path().join(".").join("once.txt");
+
+        let (first, _) = workspace.open_path(&file).unwrap();
+        let count = workspace.session().buffers.len();
+        let (second, _) = workspace.open_path(&awkward).unwrap();
+
+        assert_eq!(first, second, "`./` must not produce a rival tab");
+        assert_eq!(workspace.session().buffers.len(), count);
+    }
+
+    #[test]
+    fn an_opened_files_path_is_stored_absolute() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("rel.txt");
+        fs::write(&file, "x").unwrap();
+        let (id, _) = workspace.open_path(&file).unwrap();
+        let stored = workspace
+            .session()
+            .buffer(&id)
+            .unwrap()
+            .path
+            .clone()
+            .unwrap();
+        assert!(
+            Path::new(&stored).is_absolute(),
+            "a relative path would reopen against the wrong directory: {stored}"
+        );
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_original_file_intact() {
+        let (dir, mut workspace) = workspace();
+        let id = workspace.session().buffers[0].id.clone();
+        workspace.update_text(&id, "new content").unwrap();
+
+        // A directory cannot be replaced by a file, so the rename fails — and
+        // the old code's fall-back would have truncated whatever was there.
+        let blocked = dir.path().join("in_the_way");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("keep.txt"), "precious").unwrap();
+
+        assert!(workspace
+            .save(&id, Some(&blocked.to_string_lossy()))
+            .is_err());
+        assert!(blocked.is_dir(), "the directory must still be a directory");
+        assert_eq!(
+            fs::read_to_string(blocked.join("keep.txt")).unwrap(),
+            "precious"
+        );
+
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "and no temp file left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
     fn opening_a_missing_file_reports_an_error_and_changes_nothing() {
         let (dir, mut workspace) = workspace();
         let before = workspace.session().clone();
@@ -1026,14 +1381,108 @@ mod tests {
     }
 
     #[test]
-    fn an_orphaned_snapshot_is_cleaned_up_on_the_next_launch() {
+    fn an_orphan_with_text_is_recovered_as_a_tab_not_deleted() {
+        // This assertion used to be the opposite — orphans were pruned. That
+        // was wrong: an orphan means something already went wrong, and the
+        // snapshot can be the only surviving copy of a note. Inverted rather
+        // than deleted so the new promise is the thing now protected.
         let dir = tempfile::tempdir().unwrap();
         {
             let (workspace, _) = Workspace::open(dir.path()).unwrap();
             workspace.store().write_buffer("leftover", "junk").unwrap();
             workspace.persist().unwrap();
         }
+        let (workspace, note) = Workspace::open(dir.path()).unwrap();
+        assert_eq!(workspace.store().read_buffer("leftover").unwrap(), "junk");
+        assert!(
+            workspace.session().buffer("leftover").is_some(),
+            "recovered as a tab"
+        );
+        assert!(workspace.session().buffer("leftover").unwrap().dirty);
+        assert!(note.unwrap().contains("Recovered 1"));
+    }
+
+    #[test]
+    fn an_empty_orphan_is_discarded_rather_than_opened_as_a_blank_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (workspace, _) = Workspace::open(dir.path()).unwrap();
+            workspace.store().write_buffer("blank", "").unwrap();
+            workspace.persist().unwrap();
+        }
         let (workspace, _) = Workspace::open(dir.path()).unwrap();
-        assert_eq!(workspace.store().read_buffer("leftover").unwrap(), "");
+        assert!(workspace.session().buffer("blank").is_none());
+        assert!(!workspace.store().buffers_dir().join("blank.txt").exists());
+    }
+
+    // ── The notes must survive a broken session file ──────────────────────
+
+    #[test]
+    fn a_corrupt_session_file_does_not_destroy_the_notes() {
+        // Previously: a corrupt session.json produced an empty session, and
+        // pruning against it deleted every snapshot in the store. The one
+        // moment the notes mattered most was the moment they were erased.
+        let dir = tempfile::tempdir().unwrap();
+        let ids: Vec<String>;
+        {
+            let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
+            let first = workspace.session().buffers[0].id.clone();
+            workspace
+                .update_text(&first, "server password reminder")
+                .unwrap();
+            let second = workspace.new_scratch().unwrap();
+            workspace.update_text(&second, "the other note").unwrap();
+            ids = vec![first, second];
+        }
+        fs::write(dir.path().join("session.json"), "{ truncated").unwrap();
+
+        let (restored, note) = Workspace::open(dir.path()).unwrap();
+
+        let texts: Vec<String> = ids.iter().map(|id| restored.text(id).unwrap()).collect();
+        assert!(
+            texts.contains(&"server password reminder".to_string())
+                && texts.contains(&"the other note".to_string()),
+            "both notes should still be readable, got {texts:?}"
+        );
+        assert_eq!(
+            restored.session().buffers.len(),
+            2,
+            "and both reopened as tabs"
+        );
+        assert!(
+            note.unwrap().contains("recovered"),
+            "the user should be told"
+        );
+    }
+
+    #[test]
+    fn a_deleted_session_file_does_not_destroy_the_notes() {
+        // Same hazard by a different route: load_session returns an empty
+        // session for a MISSING file too, which a prune would act on.
+        let dir = tempfile::tempdir().unwrap();
+        let id;
+        {
+            let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
+            id = workspace.session().buffers[0].id.clone();
+            workspace.update_text(&id, "still here").unwrap();
+        }
+        fs::remove_file(dir.path().join("session.json")).unwrap();
+
+        let (restored, _) = Workspace::open(dir.path()).unwrap();
+        assert_eq!(restored.text(&id).unwrap(), "still here");
+        assert_eq!(restored.session().buffers.len(), 1);
+    }
+
+    #[test]
+    fn recovery_ignores_files_it_did_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (workspace, _) = Workspace::open(dir.path()).unwrap();
+        let stray = workspace.store().buffers_dir().join("not a safe id.txt");
+        fs::write(&stray, "someone else's file").unwrap();
+        drop(workspace);
+
+        let (restored, _) = Workspace::open(dir.path()).unwrap();
+        assert_eq!(restored.session().buffers.len(), 1, "not adopted as a tab");
+        assert!(stray.exists(), "and not deleted either");
     }
 }

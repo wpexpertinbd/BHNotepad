@@ -555,3 +555,9 @@ body {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
+
+/* A tab whose file could not be decoded cleanly: saving over the original is
+ * refused, so the status bar has to say why rather than just failing later. */
+.statusbar .is-warning {
+  color: var(--syn-invalid);
+}

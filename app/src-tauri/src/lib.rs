@@ -9,7 +9,7 @@
 //! check, nothing that can veto a close. Text is written through to disk as it
 //! is typed, so quitting is never a decision point. See CLAUDE.md.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use bhn_core::{Session, Workspace};
@@ -253,11 +253,24 @@ fn open_files(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
 ///
 /// Skips the program name and anything that looks like a flag, so a stray
 /// `--flag` from a launcher is not treated as a file name.
-fn paths_from_args<I: IntoIterator<Item = String>>(args: I) -> Vec<PathBuf> {
+///
+/// `cwd` is the directory the arguments were written relative to. A second
+/// launch forwards its arguments to the running app, whose working directory
+/// is somewhere else entirely — so resolving a relative `notes.txt` against
+/// our own cwd would open, and later overwrite, a different file of the same
+/// name.
+fn paths_from_args<I: IntoIterator<Item = String>>(args: I, cwd: &Path) -> Vec<PathBuf> {
 	args.into_iter()
 		.skip(1)
 		.filter(|arg| !arg.starts_with('-'))
-		.map(PathBuf::from)
+		.map(|arg| {
+			let path = PathBuf::from(arg);
+			if path.is_absolute() {
+				path
+			} else {
+				cwd.join(path)
+			}
+		})
 		.filter(|path| path.is_file())
 		.collect()
 }
@@ -281,14 +294,15 @@ fn flush_quietly(app: &tauri::AppHandle) {
 pub fn run() {
 	let builder = tauri::Builder::default();
 
-	// Windows and Linux start a whole new process when a file is
-	// double-clicked. Two processes sharing one session store would fight over
-	// session.json and could lose tabs, so a second launch hands its arguments
-	// to the running app and exits. macOS does not need this: Launch Services
-	// keeps one instance and delivers files through RunEvent::Opened below.
-	#[cfg(any(target_os = "windows", target_os = "linux"))]
-	let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-		open_files(app, paths_from_args(argv));
+	// A second process sharing the same store can lose tabs: it persists a
+	// session that knows nothing about the first one's, and those notes are
+	// then unreferenced. Windows and Linux start a new process for every
+	// double-clicked file; macOS normally keeps one instance, but `open -n`
+	// starts a rival anyway. So a second launch always hands its files to the
+	// running app and exits, on every desktop platform.
+	#[cfg(desktop)]
+	let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+		open_files(app, paths_from_args(argv, Path::new(&cwd)));
 	}));
 
 	builder
@@ -308,7 +322,8 @@ pub fn run() {
 			// Files named on the command line (how Windows and Linux deliver a
 			// double-clicked document to a cold start), plus anything macOS
 			// handed over before the workspace existed.
-			let mut paths = paths_from_args(std::env::args());
+			let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+			let mut paths = paths_from_args(std::env::args(), &cwd);
 			if let Ok(mut pending) = PENDING_FILES.lock() {
 				paths.append(&mut pending);
 			}

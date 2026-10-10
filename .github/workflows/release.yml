@@ -17,6 +17,12 @@ on:
 permissions:
   contents: write
 
+# Two tags released at once could prune each other's release. Serialise them,
+# and never cancel a run half-way through uploading.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   build:
     name: ${{ matrix.name }}
@@ -58,6 +64,12 @@ jobs:
             optional: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The build runs third-party code (npm install, build scripts) in a
+          # job that holds contents:write. Don't leave a git credential lying
+          # in the checkout for it to find; the upload step authenticates
+          # explicitly through GH_TOKEN instead.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           # The Intel build runs on an Apple-silicon runner, so its target has
@@ -128,7 +140,12 @@ jobs:
   prune:
     name: Remove older releases
     needs: build
-    if: always() && !cancelled()
+    # `success()`, NOT `always()`. The optional Windows and Linux jobs are
+    # continue-on-error, so they still report success and cannot hold a macOS
+    # release up — but a FAILED macOS build must stop the prune, or a partly
+    # built release would replace a complete one and leave nothing good to
+    # download.
+    if: success()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -141,10 +158,14 @@ jobs:
           # Never prune unless the release being built actually exists and has
           # something attached; deleting the old ones after a failed build
           # would leave nothing to download at all.
-          count=$(gh release view "$KEEP" --repo "$GITHUB_REPOSITORY" \
-                    --json assets -q '.assets | length' 2>/dev/null || echo 0)
-          if [ "$count" -lt 1 ]; then
-            echo "::warning::$KEEP has no assets — keeping the older releases"
+          # Both macOS installers must be present, not merely "at least one
+          # asset": a release carrying only a Linux .deb is not something to
+          # delete the previous complete release for.
+          dmgs=$(gh release view "$KEEP" --repo "$GITHUB_REPOSITORY" \
+                   --json assets -q '[.assets[].name | select(endswith(".dmg"))] | length' \
+                   2>/dev/null || echo 0)
+          if [ "$dmgs" -lt 2 ]; then
+            echo "::warning::$KEEP has $dmgs of 2 macOS installers — keeping the older releases"
             exit 0
           fi
 

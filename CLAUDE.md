@@ -118,7 +118,7 @@ notepad/
       and **Save All** (asks per unsaved tab, cancelling one skips it rather than aborting the
       run), reachable from a **File menu** at the left of the tab strip and by
       `Cmd/Ctrl+Shift+W` / `Cmd/Ctrl+Alt+S`.
-- [x] **Security audit done and fixed** — see below. 65 tests green.
+- [x] **Two security audits done and fixed** (mine, then Codex) — see below. 76 tests green.
 - [ ] Windows + Linux: built by CI, never run on real hardware. Benjamin to test the `.exe`.
 - [ ] Not yet: multiple windows, macro recording, column mode, document map.
 
@@ -252,3 +252,92 @@ test was proved non-vacuous by sabotaging the fix and watching it fail.
 by any JS in the webview. That is unavoidable for an editor. It is contained by the strict CSP
 (no remote scripts/styles/frames, everything bundled), no remote content ever being loaded, and
 no HTML sink in the UI — so there is no route for foreign script to run in the first place.
+
+---
+
+## 🔒 Second audit — Codex, independent, 2026-10-10
+
+Codex raised 16 surviving findings and said hold the release. **It was right about the
+important ones.** Everything below was verified against the code before acting — not taken on
+trust — and each fix has a test proved non-vacuous by sabotage.
+
+### The two that mattered most
+1. **🔴 A non-ASCII filename aborted the entire app.** `language::detect` did `name[1..]` to skip a
+   leading dot, which slices *inside* the first character of `é.txt`, `বাংলা.txt`, `日本語.py` or
+   `📄.md`. Release builds set `panic = "abort"`, so double-clicking such a file killed the
+   process and took every other tab's pending keystrokes with it. **Bengali filenames crashed the
+   editor** — about the worst possible bug for this user. Fixed with `rfind('.')` (ASCII, so
+   always a char boundary) filtered to offset > 0. Verified live: a `বাংলা.txt` now opens fine.
+2. **🔴 A broken session file deleted every note.** `Workspace::open` pruned orphan snapshots
+   against the loaded session — and `load_session` returns an *empty* session when `session.json`
+   is corrupt **or missing**. So the one moment the snapshots were the only surviving copy was the
+   moment they were erased. **Pruning is gone entirely**, replaced by `recover_orphans`: an
+   unreferenced snapshot with text in it becomes a tab again (empty ones are dropped). Closing a
+   tab deletes its snapshot explicitly, so in normal operation there are no orphans at all.
+   ⚠️ The old test `an_orphaned_snapshot_is_cleaned_up_on_the_next_launch` was **inverted, not
+   deleted** — the new promise is now the thing protected.
+
+### Also fixed
+3. **Save wrote the previous text.** `save()` reads the *store*, and the UI debounces writes by
+   300 ms — so typing then pressing Save immediately wrote the older text and reported success.
+   The Editor now exposes an imperative flush that Save, Save All and window-hide call first.
+4. **A steady typist could go minutes with nothing on disk.** A pure debounce resets on every
+   keystroke. Added `AUTOSAVE_MAX_MS = 2000` as a ceiling regardless of typing speed.
+5. **Save All skipped edits made after a save.** Dirtiness was reported only on a tab's *first*
+   edit, so a saved-then-edited tab looked clean, Save All skipped it and closing it discarded
+   the change. The first-edit channel is gone; every debounced write marks the tab dirty.
+6. **Close All said "nothing will be lost" while discarding work** — it counted only path-less
+   tabs, ignoring saved files with unsaved edits. It now counts both, and **persists the new
+   session before deleting snapshots** (the reverse order left a window where a crash produced
+   tabs pointing at missing files).
+7. **A failed save truncated the original.** Any failure fell back to `fs::write`, so a full disk
+   destroyed the existing file and then failed anyway. The fall-back is gone — the temp file is
+   in the destination's own directory, so a rename can never need to cross a filesystem and it
+   bought nothing.
+8. **The permission fix from round one was incomplete.** The temp file was created with the umask
+   default and chmod-ed *after* writing, so a private file's contents sat briefly in a 0644 temp.
+   Permissions are now decided before the bytes are written.
+9. **TOCTOU on open.** `metadata(path)` then `read(path)` resolves the path twice. Now one handle:
+   checked via `file.metadata()` and read through `take(limit + 1)`, which also catches a file
+   that grows mid-read. A path-level pre-check still rejects FIFOs before `open` can block on one.
+10. **Paths were stored as given**, so `notes.txt` could reopen against a different directory and
+    Save overwrite the wrong file, and `/tmp/a.txt` vs `/tmp/./a.txt` opened rival tabs with
+    competing snapshots. Paths are canonicalised on open, and the single-instance callback now
+    resolves forwarded arguments against **the sender's** cwd instead of discarding it.
+11. **macOS could run a second instance** (`open -n`) sharing one store. Single-instance is now on
+    for every desktop platform. ⚠️ `cfg(desktop)` works in Rust source but **not as a Cargo target
+    predicate** — Cargo doesn't know the name and silently selects nothing, so the platforms are
+    listed out in `Cargo.toml`. Verified: `open -n` yields one process, and file association still
+    works cold and warm.
+13. **Line endings and encoding were destroyed silently.** CodeMirror normalises CRLF to LF, so a
+    one-word change to a Windows file rewrote every line. `Buffer` now carries `eol` and `lossy`:
+    the file's own line endings are restored on save, and a file that could not be decoded as
+    UTF-8 **refuses to be saved over** (Save As still works, so the user can rescue it). Both are
+    shown in the status bar.
+14. **The prune job could delete every usable release.** It ran on `always()` and needed only one
+    asset, so a partial build could replace a complete release. Now `if: success()` plus a check
+    that **both** macOS installers are attached, and a `concurrency: release` group.
+15. **`contents: write` spanned the whole release job**, including `npm ci` and the build. Added
+    `persist-credentials: false` so third-party build code finds no git credential; the upload
+    authenticates explicitly through `GH_TOKEN`. CI declares `contents: read`.
+16. **No directory fsync.** `sync_all` commits a file's contents but not the directory entry
+    naming it, so a real power cut could lose a rename. Added after every rename, in the store and
+    on user saves.
+
+### Deliberately NOT fixed — stated, not hidden
+- **#2 The IPC boundary is an arbitrary file read/write** (`open_path`, `save`) callable by any JS
+  in the webview. Unavoidable for an editor; redesigning it around opaque grants is a large change
+  for a threat that requires foreign script to run in the first place, and the CSP plus the total
+  absence of remote content and HTML sinks is what prevents that. ⚠️ Codex was right that the
+  **capability file's description was inaccurate** — it claimed dialog-only filesystem access.
+  Rewritten to say plainly that it does not bound the app's own commands.
+- **#12 ReDoS in Find** — the user types their own regex, locally, in their own editor; Notepad++
+  is no different. Count and Replace All run on the UI thread. Documented, not fixed.
+- Pinning Actions to commit SHAs: not done, same as BHUninstaller. Accepted.
+
+### Codex findings that died under verification or refutation
+Its own refutation pass killed ten more (file content executing as HTML, `../` in buffer ids, the
+late-autosave resurrection already fixed in round one, tab-switch cancelling edits, lexer hangs,
+invalid UTF-8 panicking Rust, store symlinks, shell injection via tag names, fork PRs getting the
+write token). ⚠️ Codex also **stalled on first dispatch**, replying "I'll wait. Say go" and doing
+nothing — if a review comes back empty, check for that before believing there were no findings.

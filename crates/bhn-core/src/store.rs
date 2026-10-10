@@ -146,6 +146,16 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
             source,
         });
     }
+
+    // `sync_all` on the file commits its contents; it says nothing about the
+    // directory entry that now names it. Without this a real power cut — as
+    // opposed to the process being killed, which is all a test can simulate —
+    // can lose the rename and with it the note. Best effort: not every
+    // filesystem supports it, and that is not a reason to report a failure.
+    #[cfg(unix)]
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 
@@ -307,6 +317,56 @@ impl Store {
 /// A scratch store should only ever hold UTF-8 that this app wrote, but an
 /// opened file can be anything — and refusing to show a log file because of
 /// one bad byte would be worse than showing it with a replacement character.
+/// What decoding a file produced, and what had to be given up to do it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decoded {
+    /// The text, with all line endings normalised to LF.
+    pub text: String,
+    /// True when bytes had to be replaced because they were not valid UTF-8.
+    /// Saving over the original would then destroy them.
+    pub lossy: bool,
+    /// `"crlf"` when the file predominantly used Windows line endings, so the
+    /// save path can put them back.
+    pub eol: &'static str,
+}
+
+/// Decodes a file's bytes, recording what was normalised rather than doing it
+/// silently.
+///
+/// The editor works in LF internally. Converting on the way in and back on the
+/// way out is what keeps a one-word change to a Windows file from rewriting
+/// every line in it.
+pub fn decode_file(bytes: Vec<u8>) -> Decoded {
+    let had_bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
+    let body = if had_bom { bytes[3..].to_vec() } else { bytes };
+
+    let (text, lossy) = match String::from_utf8(body) {
+        Ok(text) => (text, false),
+        Err(error) => (String::from_utf8_lossy(error.as_bytes()).into_owned(), true),
+    };
+
+    // "Predominantly" rather than "any": a file with mixed endings is usually
+    // mostly one of them, and that is what the user expects to keep.
+    let crlf = text.matches("\r\n").count();
+    let bare_lf = text.matches('\n').count() - crlf;
+    let eol = if crlf > bare_lf { "crlf" } else { "lf" };
+
+    Decoded {
+        text: text.replace("\r\n", "\n"),
+        lossy,
+        eol,
+    }
+}
+
+/// Puts a buffer's original line endings back for writing to disk.
+pub fn encode_eol(text: &str, eol: &str) -> String {
+    if eol == "crlf" {
+        text.replace('\n', "\r\n")
+    } else {
+        text.to_string()
+    }
+}
+
 pub fn decode_utf8_lossy(bytes: Vec<u8>) -> String {
     let body = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         Some(rest) => rest.to_vec(),

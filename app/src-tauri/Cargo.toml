@@ -28,8 +28,15 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 
-# Only Windows and Linux spawn a second process for a double-clicked file, and
-# two processes sharing one session store could lose tabs. macOS keeps a single
-# instance by itself, so it does not pay for this.
-[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+# Two processes sharing one session store can lose tabs: one persists a session
+# that knows nothing about the other's, and those notes are left unreferenced.
+# Windows and Linux start a new process for every double-clicked file; macOS
+# normally keeps one instance, but `open -n` starts a rival anyway. So this is
+# on for every desktop platform.
+#
+# Note: `cfg(desktop)` works in Rust source, where Tauri's build script defines
+# it, but NOT as a Cargo target predicate — Cargo does not know that name and
+# silently selects nothing, so the crate goes missing. The platforms are listed
+# out instead.
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 tauri-plugin-single-instance = "2"

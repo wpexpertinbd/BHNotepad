@@ -116,11 +116,8 @@ pub fn detect(name_or_path: &str) -> &'static str {
         }
     }
 
-    // A dotfile with no further dot (".profile") has no extension — its whole
-    // name is the identifier, and that was handled above. Starting the search
-    // at index 1 keeps `rfind` from treating the leading dot as a separator.
-    if let Some(dot) = name[1..].rfind('.') {
-        let ext = &name[dot + 2..];
+    if let Some(dot) = last_dot(&name) {
+        let ext = &name[dot + 1..];
         for (candidate, id) in BY_EXTENSION {
             if ext == *candidate {
                 return id;
@@ -128,9 +125,9 @@ pub fn detect(name_or_path: &str) -> &'static str {
         }
         // `foo.conf.bak`, `app.log.1` — a backup or rotation suffix hides the
         // real extension, so try the one before it rather than giving up.
-        let stem = &name[..dot + 1];
-        if let Some(prev) = stem[1..].rfind('.') {
-            let ext2 = &stem[prev + 2..];
+        let stem = &name[..dot];
+        if let Some(prev) = last_dot(stem) {
+            let ext2 = &stem[prev + 1..];
             for (candidate, id) in BY_EXTENSION {
                 if ext2 == *candidate {
                     return id;
@@ -140,6 +137,23 @@ pub fn detect(name_or_path: &str) -> &'static str {
     }
 
     PLAIN
+}
+
+/// Byte offset of the extension separator, or `None` when there is no
+/// extension to speak of.
+///
+/// ⚠️ This exists because slicing a name at a fixed byte offset to skip a
+/// leading dot — `name[1..]` — panics on any name whose first character is
+/// multibyte: `é.txt`, `বাংলা.txt`, `日本語.py`, `📄.md`. Release builds abort
+/// on panic, so double-clicking such a file killed the whole editor and took
+/// every other tab's pending keystrokes with it.
+///
+/// `rfind('.')` is safe because `.` is ASCII and can only match at a character
+/// boundary. Offset 0 means a dotfile with no extension (`.profile`), whose
+/// whole name is the identifier and which the file-name table has already had
+/// a chance to match.
+fn last_dot(name: &str) -> Option<usize> {
+    name.rfind('.').filter(|&index| index > 0)
 }
 
 /// Final path component, handling both separators so a Windows path parses
@@ -191,6 +205,22 @@ mod tests {
         assert_eq!(detect("nginx.conf.bak"), "properties");
         assert_eq!(detect("server.log.1"), PLAIN);
         assert_eq!(detect("schema.sql.orig"), "sql");
+    }
+
+    #[test]
+    fn a_multibyte_first_character_does_not_panic() {
+        // Release builds abort on panic, so this crashed the whole editor —
+        // and Bengali, Japanese or accented file names are entirely ordinary.
+        assert_eq!(detect("é.txt"), PLAIN);
+        assert_eq!(detect("বাংলা.txt"), PLAIN);
+        assert_eq!(detect("日本語.py"), "python");
+        assert_eq!(detect("📄.md"), "markdown");
+        assert_eq!(detect("ü.rs"), "rust");
+        assert_eq!(detect("Ωmega.json"), "json");
+        assert_eq!(detect("é"), PLAIN);
+        assert_eq!(detect("📄"), PLAIN);
+        assert_eq!(detect("/tmp/বাংলা/নোট.sql"), "sql");
+        assert_eq!(detect("café.conf.bak"), "properties");
     }
 
     #[test]

@@ -18,6 +18,15 @@ import { editorTheme, highlighting } from "./theme";
 
 /** How long after the last keystroke the text is written to disk. */
 const AUTOSAVE_MS = 300;
+/**
+ * The longest the text may go unwritten while typing continues.
+ *
+ * A plain debounce resets on every keystroke, so someone typing steadily with
+ * no 300 ms gap could go minutes with nothing on disk — which would quietly
+ * undo the one promise this app makes. This is the ceiling regardless of how
+ * fast they type.
+ */
+const AUTOSAVE_MAX_MS = 2000;
 /** Caret/scroll are cheap to lose, so they are reported less eagerly. */
 const POSITION_MS = 700;
 
@@ -31,10 +40,17 @@ interface Props {
    * would be held for the life of the session.
    */
   openIds: string[];
-  onTextChanged: (id: string, text: string) => void;
+  onTextChanged: (id: string, text: string) => Promise<void>;
   onPositionChanged: (id: string, caret: number, scrollTop: number) => void;
-  /** Called the first time a tab is edited, so the tab bar can show a dot. */
-  onFirstEdit: (id: string) => void;
+  /**
+   * Receives a function that writes the current tab's text through
+   * immediately, bypassing the debounce.
+   *
+   * Save must call this first: it writes whatever is in the store, so without
+   * a flush, typing and then pressing Save within the debounce window saves
+   * the PREVIOUS text and reports success.
+   */
+  registerFlush: (flush: (() => Promise<void>) | null) => void;
   /** Line/column for the status bar. Throttled, not debounced — it should
    *  track the caret closely without re-rendering on every keystroke. */
   onCaretInfo: (info: { line: number; col: number; selected: number }) => void;
@@ -51,7 +67,7 @@ export function Editor({
   openIds,
   onTextChanged,
   onPositionChanged,
-  onFirstEdit,
+  registerFlush,
   onCaretInfo,
   onViewReady,
 }: Props) {
@@ -69,21 +85,22 @@ export function Editor({
   const positionTimer = useRef<number | null>(null);
   // Held in refs so the update listener never closes over a stale prop.
   const caretTimer = useRef<number | null>(null);
+  /** When the oldest unwritten edit happened, for the maximum-delay ceiling. */
+  const pendingSince = useRef<number | null>(null);
   const callbacks = useRef({
     onTextChanged,
     onPositionChanged,
-    onFirstEdit,
     onCaretInfo,
     onViewReady,
+    registerFlush,
   });
   callbacks.current = {
     onTextChanged,
     onPositionChanged,
-    onFirstEdit,
     onCaretInfo,
     onViewReady,
+    registerFlush,
   };
-  const dirtyReported = useRef(new Set<string>());
 
   const makeState = (contents: string, wrap: boolean) =>
     EditorState.create({
@@ -113,15 +130,21 @@ export function Editor({
           if (!id) return;
 
           if (update.docChanged) {
-            if (!dirtyReported.current.has(id)) {
-              dirtyReported.current.add(id);
-              callbacks.current.onFirstEdit(id);
-            }
-            if (textTimer.current !== null) window.clearTimeout(textTimer.current);
             const body = update.state.doc.toString();
+            if (textTimer.current !== null) window.clearTimeout(textTimer.current);
+            if (pendingSince.current === null) pendingSince.current = Date.now();
+
+            // Normally debounce, but never let the ceiling be exceeded: a
+            // steady typist produces a docChanged every few tens of
+            // milliseconds, and a pure debounce would keep moving the write
+            // out of reach indefinitely.
+            const waited = Date.now() - pendingSince.current;
+            const delay = Math.max(0, Math.min(AUTOSAVE_MS, AUTOSAVE_MAX_MS - waited));
             textTimer.current = window.setTimeout(() => {
+              textTimer.current = null;
+              pendingSince.current = null;
               callbacks.current.onTextChanged(id, body);
-            }, AUTOSAVE_MS);
+            }, delay);
           }
 
           if (update.docChanged || update.selectionSet) {
@@ -172,7 +195,23 @@ export function Editor({
     instance.focus();
     callbacks.current.onViewReady(instance);
 
+    // Writes whatever is in the editor right now, cancelling the pending
+    // debounce. Save calls this before asking the core to write the file,
+    // because the core saves what is in the STORE, not what is on screen.
+    const flush = async () => {
+      if (textTimer.current !== null) {
+        window.clearTimeout(textTimer.current);
+        textTimer.current = null;
+      }
+      pendingSince.current = null;
+      const id = currentId.current;
+      if (!id) return;
+      await callbacks.current.onTextChanged(id, instance.state.doc.toString());
+    };
+    callbacks.current.registerFlush(flush);
+
     return () => {
+      callbacks.current.registerFlush(null);
       callbacks.current.onViewReady(null);
       // Anything still pending must reach disk; a React remount in development
       // would otherwise drop the last few hundred milliseconds of typing.
@@ -251,7 +290,7 @@ export function Editor({
     for (const id of [...states.current.keys()]) {
       if (!open.has(id)) {
         states.current.delete(id);
-        dirtyReported.current.delete(id);
+
       }
     }
   }, [openIds]);

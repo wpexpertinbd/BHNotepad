@@ -46,6 +46,24 @@ pub struct Buffer {
     /// Per-tab word wrap, like Notepad++'s per-view setting.
     #[serde(default)]
     pub word_wrap: bool,
+    /// The line ending this file arrived with: `"crlf"` or `"lf"`.
+    ///
+    /// The editor normalises everything to LF internally, so without this a
+    /// Windows file would come back with every one of its line endings
+    /// rewritten — a diff touching the whole file for a one-word change.
+    #[serde(default = "default_eol")]
+    pub eol: String,
+    /// Set when the file could not be decoded as UTF-8 and characters were
+    /// replaced. Saving over the original would destroy the bytes that were
+    /// not understood, so it is refused; Save As is still allowed.
+    #[serde(default)]
+    pub lossy: bool,
+}
+
+/// Line endings default to LF: it is what a new scratch note should have on
+/// every platform, and what the editor uses internally.
+fn default_eol() -> String {
+    "lf".to_string()
 }
 
 fn default_language() -> String {
@@ -64,6 +82,8 @@ impl Buffer {
             caret: 0,
             scroll_top: 0,
             word_wrap: false,
+            eol: default_eol(),
+            lossy: false,
         }
     }
 
@@ -79,6 +99,8 @@ impl Buffer {
             caret: 0,
             scroll_top: 0,
             word_wrap: false,
+            eol: default_eol(),
+            lossy: false,
         }
     }
 

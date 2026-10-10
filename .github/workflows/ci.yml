@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Nothing here publishes anything; say so rather than inheriting the default.
+permissions:
+  contents: read
+
 jobs:
   core:
     # The core is plain Rust with no UI, so it is tested on all three

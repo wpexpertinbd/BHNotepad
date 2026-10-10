@@ -31,8 +31,15 @@ Nothing leaves your machine.
 
 ## How the app is locked down
 
-- The webview is granted only `core:default`, showing its own window, and the Open/Save dialogs
-  (`app/src-tauri/capabilities/default.json`). No shell, no arbitrary filesystem scope, no HTTP.
+- The capability file (`app/src-tauri/capabilities/default.json`) grants only `core:default`
+  (read-only introspection), showing and focusing this window, and the native Open/Save/confirm
+  sheets. No shell plugin, no HTTP plugin, no filesystem plugin.
+- **Being straight about what that does not cover:** BHNotepad's own commands — `open_path` and
+  `save` — read and write through `std::fs` in Rust and are callable by any script running in the
+  window. An editor cannot avoid that. What prevents it being reachable is that no remote content
+  is ever loaded, the CSP forbids remote scripts and `eval`, and nothing in the interface renders
+  anything as HTML, so there is no way for foreign script to run in the first place. If you find
+  one, that is the report worth sending.
 - A strict Content-Security-Policy is set in `tauri.conf.json`: no remote scripts, styles, fonts
   or frames; everything is bundled.
 - Buffer ids are validated before they are used to build a path, so a hand-edited or crafted
@@ -43,8 +50,15 @@ Nothing leaves your machine.
 - Opening a file checks it is a regular file and at most 64 MB first, so a double-clicked
   multi-gigabyte log — or a character device such as `/dev/zero` — cannot exhaust memory or hang
   the app. File associations make that an attacker-reachable path, which is why it is checked.
-- Saving copies the destination file's existing permissions onto the temporary file before the
-  rename, so re-saving a file you had deliberately made private does not widen it.
+- Saving creates its temporary file with the destination's permissions from the outset, so a
+  private file's contents are never briefly readable by others, and the rename cannot widen it.
+- A save that fails leaves the original untouched. There is no fall-back direct write, because
+  the case that makes the temporary file fail — a full disk — is exactly the case where falling
+  back would truncate the file you already had.
+- A file that is not valid UTF-8 is opened read-only in effect: the bytes that could not be
+  decoded were replaced, so saving over the original is refused and Save As is offered instead.
+- Line endings are preserved. A Windows file is written back with CRLF rather than being
+  silently converted.
 
 ## Supported versions
 

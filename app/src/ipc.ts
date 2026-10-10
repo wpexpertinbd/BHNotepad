@@ -15,6 +15,11 @@ export interface Buffer {
   caret: number;
   scroll_top: number;
   word_wrap: boolean;
+  /** `"crlf"` or `"lf"` — the line ending the file arrived with. */
+  eol: string;
+  /** The file was not valid UTF-8 and characters were replaced, so saving
+   *  over the original is refused. */
+  lossy: boolean;
 }
 
 /** Mirrors `bhn_core::session::Session`. */

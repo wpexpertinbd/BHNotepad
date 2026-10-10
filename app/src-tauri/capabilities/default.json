@@ -1,10 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the BHNotepad window is allowed to do. Kept to the minimum: the editor needs the Open and Save sheets and nothing else. No shell, no HTTP, no filesystem scope beyond what the user picks in a dialog.",
-  "windows": [
-    "main"
-  ],
+  "description": "Plugin and core permissions for the editor window: the native Open/Save/confirm sheets, and showing and focusing its own window. NOTE: this file does NOT bound the app's filesystem access — BHNotepad's own commands (open_path, save) read and write through std::fs in Rust and are callable by any script running in this webview. What contains that is the strict CSP in tauri.conf.json plus the fact that no remote content is ever loaded, not this allow-list. See SECURITY.md.",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-show",

@@ -64,6 +64,8 @@ and checks all six tabs and their text came back.
 - **Light and dark** following the system, with no setting to forget about.
 - **Open and save real files** when a note graduates into one, including by double-clicking one
   in Finder or Explorer — BHNotepad registers itself for about 70 text and source extensions.
+- **Line endings are preserved**: a Windows file is written back with CRLF, so a one-word change
+  does not show up as a diff touching every line.
 - **Save All** walks your unsaved tabs one at a time, asking where each should go.
 - **Close All** clears the board behind a single confirmation that tells you how many tabs have
   never been saved.
@@ -119,6 +121,9 @@ Click **More info → Run anyway**. The installer is per-user and needs no admin
   API that does not exist here. Nothing short of running Notepad++ itself will load them.
 - **Not a clone.** No macro recording, column-mode editing, document map or FTP browser yet.
 - **One window.** Tabs live in a single window for now.
+- **A file that is not valid UTF-8 can be read but not saved in place.** The bytes that could not
+  be decoded are shown as replacement characters, and writing those back would destroy them, so
+  Save over the original is refused and Save As is offered. Proper encoding support is a later job.
 - **Files are capped at 64 MB.** Opening is unbounded otherwise, and the text is held in memory,
   handed to the editor and snapshotted on every autosave — a cap is the honest limit rather than
   a hang. Very large files are not this editor's strength in any case.

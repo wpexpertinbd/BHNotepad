@@ -36,6 +36,8 @@ export function App() {
   const [caret, setCaret] = useState<CaretInfo>({ line: 1, col: 1, selected: 0 });
   const [find, setFind] = useState<FindMode | null>(null);
   const [view, setView] = useState<EditorView | null>(null);
+  /** Set by the Editor; writes the live text through, bypassing the debounce. */
+  const flushEditor = useRef<(() => Promise<void>) | null>(null);
 
   const active: Buffer | null = useMemo(() => {
     if (!session || session.buffers.length === 0) return null;
@@ -170,6 +172,10 @@ export function App() {
     async (asNew: boolean) => {
       if (!active) return;
       try {
+        // The core writes what is in the STORE. Without this, typing and then
+        // pressing Save inside the 300ms debounce wrote the PREVIOUS text to
+        // the file and cheerfully reported success.
+        await flushEditor.current?.();
         let target: string | undefined;
         if (asNew || !active.path) {
           const picked = await saveDialog({
@@ -213,19 +219,33 @@ export function App() {
   const handleCloseAll = useCallback(async () => {
     if (!session) return;
     const count = session.buffers.length;
-    const unsaved = session.buffers.filter((b) => !b.path).length;
+    // A named file with unsaved EDITS loses those edits just as surely as an
+    // untitled tab loses all of its text. Counting only path-less tabs told
+    // the user "nothing will be lost" and then discarded their work.
+    const untitled = session.buffers.filter((b) => !b.path).length;
+    const editedFiles = session.buffers.filter((b) => b.path && b.dirty).length;
+    const atRisk = untitled + editedFiles;
 
+    const parts: string[] = [];
+    if (untitled > 0) {
+      parts.push(
+        `${untitled} ${untitled === 1 ? "tab has" : "tabs have"} never been saved to a file`,
+      );
+    }
+    if (editedFiles > 0) {
+      parts.push(
+        `${editedFiles} saved ${editedFiles === 1 ? "file has" : "files have"} unsaved changes`,
+      );
+    }
     const detail =
-      unsaved > 0
-        ? `${unsaved === count ? "All " : ""}${unsaved} ${
-            unsaved === 1 ? "tab has" : "tabs have"
-          } never been saved to a file. Their text will be discarded.`
-        : "Every tab is saved to a file, so nothing will be lost.";
+      atRisk > 0
+        ? `${parts.join(", and ")}. That text will be discarded.`
+        : "Every tab is saved, so nothing will be lost.";
 
     try {
       const go = await confirmDialog(
         `Close all ${count} ${count === 1 ? "tab" : "tabs"}?\n\n${detail}`,
-        { title: "Close All", kind: unsaved > 0 ? "warning" : "info", okLabel: "Close All" },
+        { title: "Close All", kind: atRisk > 0 ? "warning" : "info", okLabel: "Close All" },
       );
       if (!go) return;
 
@@ -246,11 +266,15 @@ export function App() {
   const handleSaveAll = useCallback(async () => {
     if (!session) return;
     try {
+      await flushEditor.current?.();
       let saved = 0;
       let skipped = 0;
       let latest: Session | null = null;
 
-      for (const buffer of session.buffers) {
+      // Re-read after the flush: the tab just flushed may have become dirty,
+      // and this loop decides what to write from exactly that flag.
+      const current = await ipc.sessionState();
+      for (const buffer of current.session.buffers) {
         let target: string | undefined;
         if (!buffer.path) {
           const picked = await saveDialog({ defaultPath: buffer.title });
@@ -299,9 +323,26 @@ export function App() {
   );
 
   const handleTextChanged = useCallback(
-    (id: string, body: string) => {
+    async (id: string, body: string) => {
       setTexts((all) => ({ ...all, [id]: body }));
-      void ipc.updateText(id, body).catch((error) => fail("Could not save your typing", error));
+      // Mark dirty on EVERY edit. Doing it only on the first one left a tab
+      // that had been saved and then edited again looking clean, so Save All
+      // skipped it and closing it discarded the change.
+      setSession((current) =>
+        current
+          ? {
+              ...current,
+              buffers: current.buffers.map((b) =>
+                b.id === id && !b.dirty ? { ...b, dirty: true } : b,
+              ),
+            }
+          : current,
+      );
+      try {
+        await ipc.updateText(id, body);
+      } catch (error) {
+        fail("Could not save your typing", error);
+      }
     },
     [fail],
   );
@@ -310,17 +351,6 @@ export function App() {
     void ipc.updatePosition(id, head, scrollTop).catch(() => {
       // Losing a caret position is not worth interrupting anyone over.
     });
-  }, []);
-
-  const handleFirstEdit = useCallback((id: string) => {
-    setSession((current) =>
-      current
-        ? {
-            ...current,
-            buffers: current.buffers.map((b) => (b.id === id ? { ...b, dirty: true } : b)),
-          }
-        : current,
-    );
   }, []);
 
   const toggleWrap = useCallback(() => {
@@ -488,12 +518,17 @@ export function App() {
   // the last reliable moment before a quit.
   useEffect(() => {
     const onHide = () => {
+      // Deliberately NOT `beforeunload` — that is the webview's version of the
+      // save nag. `pagehide` and blur let us write without ever showing one.
+      void flushEditor.current?.().catch(() => {});
       void ipc.flush().catch(() => {});
     };
     window.addEventListener("blur", onHide);
+    window.addEventListener("pagehide", onHide);
     document.addEventListener("visibilitychange", onHide);
     return () => {
       window.removeEventListener("blur", onHide);
+      window.removeEventListener("pagehide", onHide);
       document.removeEventListener("visibilitychange", onHide);
     };
   }, []);
@@ -537,7 +572,7 @@ export function App() {
           openIds={openIds}
           onTextChanged={handleTextChanged}
           onPositionChanged={handlePositionChanged}
-          onFirstEdit={handleFirstEdit}
+          registerFlush={(fn) => (flushEditor.current = fn)}
           onCaretInfo={setCaret}
           onViewReady={setView}
         />
@@ -556,8 +591,17 @@ export function App() {
       )}
 
       <div className="statusbar">
-        <span className="where" title={active.path ?? "Not saved to a file yet"}>
-          {active.path ?? "Not saved to a file — kept in your session"}
+        <span
+          className={active.lossy ? "where is-warning" : "where"}
+          title={
+            active.lossy
+              ? `${active.path} is not UTF-8; parts could not be read, so saving over it is refused — use Save As`
+              : (active.path ?? "Not saved to a file yet")
+          }
+        >
+          {active.lossy
+            ? `${active.title} — not UTF-8, use Save As`
+            : (active.path ?? "Not saved to a file — kept in your session")}
         </span>
         <span className="spacer" />
         {status && <span className="note">{status}</span>}
@@ -585,7 +629,10 @@ export function App() {
             </option>
           ))}
         </select>
-        <span className="metric">UTF-8</span>
+        <span className="metric">{active.eol === "crlf" ? "CRLF" : "LF"}</span>
+        <span className={active.lossy ? "metric is-warning" : "metric"}>
+          {active.lossy ? "UTF-8 (lossy)" : "UTF-8"}
+        </span>
       </div>
     </div>
   );
