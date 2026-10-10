@@ -1,0 +1,21 @@
+# Rust
+/target/
+
+# Node
+node_modules/
+app/dist/
+
+# Tauri generated
+app/src-tauri/gen/
+
+# Dev build output. The .noindex suffix keeps Spotlight and Launchpad from
+# indexing development copies of the app, so Finder does not show two
+# BHNotepads.
+build.noindex/
+dist.noindex/
+
+# Generated icon source (scripts/make_icon.py recreates it)
+build-icon-source.png
+
+# macOS
+.DS_Store

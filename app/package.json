@@ -1,0 +1,47 @@
+{
+  "name": "bhnotepad",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6",
+    "@codemirror/lang-cpp": "^6",
+    "@codemirror/lang-css": "^6",
+    "@codemirror/lang-go": "^6",
+    "@codemirror/lang-html": "^6",
+    "@codemirror/lang-java": "^6",
+    "@codemirror/lang-javascript": "^6",
+    "@codemirror/lang-json": "^6",
+    "@codemirror/lang-markdown": "^6",
+    "@codemirror/lang-php": "^6",
+    "@codemirror/lang-python": "^6",
+    "@codemirror/lang-rust": "^6",
+    "@codemirror/lang-sql": "^6",
+    "@codemirror/lang-xml": "^6",
+    "@codemirror/lang-yaml": "^6",
+    "@codemirror/language": "^6",
+    "@codemirror/legacy-modes": "^6",
+    "@codemirror/search": "^6",
+    "@codemirror/state": "^6",
+    "@codemirror/view": "^6",
+    "@lezer/highlight": "^1",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5",
+    "typescript": "^5.7",
+    "vite": "^7"
+  }
+}

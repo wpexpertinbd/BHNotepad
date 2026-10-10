@@ -1,0 +1,479 @@
+/* BHNotepad window chrome.
+ *
+ * Colours are declared once as custom properties and redefined for dark mode,
+ * so the editor theme in theme.ts can reference the same tokens and the whole
+ * window follows the OS without any JavaScript. */
+
+:root {
+  color-scheme: light dark;
+
+  --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Ubuntu,
+    "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --editor-font-size: 13px;
+
+  --bg: #f2f3f5;
+  --editor-bg: #ffffff;
+  --panel-bg: #f7f8fa;
+  --input-bg: #ffffff;
+  --text: #1b1d21;
+  --muted: #6a7078;
+  --border: #d6d9de;
+  --accent: #2f6fd0;
+
+  --tab-bg: #e6e8ec;
+  --tab-active-bg: #ffffff;
+  --tab-hover-bg: #dcdfe4;
+
+  --gutter-bg: #f7f8fa;
+  --gutter-text: #9aa1a9;
+  --gutter-text-active: #4a5058;
+  --active-line: rgba(47, 111, 208, 0.07);
+  --selection: rgba(47, 111, 208, 0.22);
+  --caret: #1b1d21;
+  --match: rgba(233, 180, 60, 0.38);
+  --match-outline: rgba(176, 130, 20, 0.6);
+  --match-selected: rgba(233, 140, 60, 0.55);
+
+  --syn-keyword: #9224b3;
+  --syn-variable: #1b1d21;
+  --syn-function: #1d64c4;
+  --syn-type: #0f7a6c;
+  --syn-constant: #b3541e;
+  --syn-number: #b3541e;
+  --syn-string: #1a7f37;
+  --syn-regexp: #c0392b;
+  --syn-comment: #7d858e;
+  --syn-meta: #6a7078;
+  --syn-operator: #44525f;
+  --syn-invalid: #d1242f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1d21;
+    --editor-bg: #22252a;
+    --panel-bg: #1e2126;
+    --input-bg: #2a2e34;
+    --text: #e3e6ea;
+    --muted: #949ba4;
+    --border: #34383f;
+    --accent: #6aa3f0;
+
+    --tab-bg: #22252a;
+    --tab-active-bg: #2d3138;
+    --tab-hover-bg: #292d33;
+
+    --gutter-bg: #1e2126;
+    --gutter-text: #6b737c;
+    --gutter-text-active: #c3c9d1;
+    --active-line: rgba(106, 163, 240, 0.08);
+    --selection: rgba(106, 163, 240, 0.26);
+    --caret: #e3e6ea;
+    --match: rgba(233, 180, 60, 0.3);
+    --match-outline: rgba(233, 180, 60, 0.55);
+    --match-selected: rgba(233, 140, 60, 0.5);
+
+    --syn-keyword: #c792ea;
+    --syn-variable: #e3e6ea;
+    --syn-function: #82aaff;
+    --syn-type: #5ec8b0;
+    --syn-constant: #f78c6c;
+    --syn-number: #f78c6c;
+    --syn-string: #9ad17f;
+    --syn-regexp: #ff9cac;
+    --syn-comment: #7d868f;
+    --syn-meta: #949ba4;
+    --syn-operator: #a7b4c0;
+    --syn-invalid: #ff6b6b;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 var(--ui);
+  /* The window chrome must never scroll; only the editor does. */
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  /* The Find dialog floats over the editor, positioned against this. */
+  position: relative;
+}
+
+.loading {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--muted);
+}
+
+/* ── Tabs ─────────────────────────────────────────────────────────────── */
+
+.tabbar {
+  display: flex;
+  align-items: stretch;
+  background: var(--tab-bg);
+  border-bottom: 1px solid var(--border);
+  /* Leaves room for the traffic lights on macOS, where the title bar is
+   * part of the window rather than a separate strip. */
+  padding-left: env(titlebar-area-x, 0);
+  flex: 0 0 auto;
+  min-height: 34px;
+}
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 1 1 auto;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 12px;
+  max-width: 220px;
+  min-width: 92px;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  background: var(--tab-hover-bg);
+}
+
+.tab.is-active {
+  background: var(--tab-active-bg);
+  color: var(--text);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.tab.is-dragover {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tab .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+}
+
+/* A scratch tab is always "dirty" — this dot means "lives in your session",
+ * not "you have a problem to resolve". */
+.tab .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+
+.tab .close {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: default;
+  opacity: 0;
+}
+
+.tab:hover .close,
+.tab.is-active .close {
+  opacity: 0.65;
+}
+
+.tab .close:hover {
+  opacity: 1;
+  background: var(--tab-hover-bg);
+}
+
+.newtab {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  width: 34px;
+  cursor: default;
+  flex: 0 0 auto;
+}
+
+.newtab:hover {
+  background: var(--tab-hover-bg);
+  color: var(--text);
+}
+
+/* ── Editor ───────────────────────────────────────────────────────────── */
+
+.editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editor .cm-editor {
+  height: 100%;
+}
+
+.editor .cm-editor.cm-focused {
+  outline: none;
+}
+
+/* ── Status bar ───────────────────────────────────────────────────────── */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  height: 25px;
+  background: var(--panel-bg);
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.statusbar .spacer {
+  flex: 1 1 auto;
+}
+
+.statusbar .where {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  max-width: 45%;
+}
+
+.statusbar .note {
+  color: var(--accent);
+}
+
+.statusbar .metric {
+  font-variant-numeric: tabular-nums;
+}
+
+.statusbar .toggle {
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--muted);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  cursor: default;
+}
+
+.statusbar .toggle.is-on {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.statusbar .language {
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--text);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--ui);
+  padding: 1px 4px;
+  max-width: 160px;
+}
+
+/* ── Find / Replace dialog ────────────────────────────────────────────────
+ * A floating, draggable window like Notepad++'s, rather than a strip docked
+ * to the editor. It deliberately does not take the editor's focus away from
+ * the text it is searching. */
+
+.finddialog {
+  position: absolute;
+  top: 46px;
+  right: 18px;
+  z-index: 20;
+  width: 420px;
+  max-width: calc(100% - 24px);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.22),
+    0 2px 6px rgba(0, 0, 0, 0.14);
+  overflow: hidden;
+  user-select: none;
+}
+
+.finddialog-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 6px 0 8px;
+  background: var(--tab-bg);
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+}
+
+.finddialog-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.finddialog-tabs button {
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
+  color: var(--muted);
+  font: 12px var(--ui);
+  padding: 4px 13px;
+  border-radius: 6px 6px 0 0;
+  cursor: default;
+}
+
+.finddialog-tabs button.is-on {
+  background: var(--panel-bg);
+  border-color: var(--border);
+  color: var(--text);
+  margin-bottom: -1px;
+  padding-bottom: 5px;
+}
+
+.finddialog-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: default;
+  align-self: flex-start;
+}
+
+.finddialog-close:hover {
+  background: var(--tab-hover-bg);
+  color: var(--text);
+}
+
+.finddialog-body {
+  padding: 11px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.finddialog .row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.finddialog .row span {
+  flex: 0 0 86px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.finddialog .row input[type="text"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 7px;
+  font: 12px var(--mono);
+  user-select: text;
+}
+
+.finddialog .row input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--selection);
+}
+
+.finddialog-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding-left: 95px;
+}
+
+.finddialog-options label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.finddialog-options input {
+  margin: 0;
+}
+
+.finddialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-left: 95px;
+}
+
+.finddialog-actions button {
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font: 11.5px var(--ui);
+  cursor: default;
+}
+
+.finddialog-actions button:hover:not(:disabled) {
+  background: var(--tab-hover-bg);
+}
+
+.finddialog-actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.finddialog-actions button:disabled {
+  opacity: 0.45;
+}
+
+.finddialog-message {
+  padding-left: 95px;
+  font-size: 11.5px;
+  color: var(--accent);
+}

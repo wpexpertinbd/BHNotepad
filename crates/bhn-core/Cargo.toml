@@ -1,0 +1,19 @@
+[package]
+name = "bhn-core"
+description = "Portable core for BHNotepad: session store, crash-safe autosave, language detection."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# No `tauri`, and nothing platform-specific. This crate is the part that ports
+# unchanged to Windows and Linux; the shell injects the config directory rather
+# than the core discovering it. See CLAUDE.md.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

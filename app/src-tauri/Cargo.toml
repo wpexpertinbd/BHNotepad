@@ -1,0 +1,29 @@
+[package]
+name = "bhnotepad"
+description = "Notepad++-style editor whose unsaved tabs survive quitting."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+# Tauri builds the app as a library so the same code backs the desktop binary
+# and any future mobile target.
+name = "bhnotepad_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# Kept deliberately short. Every dependency is weight in an installer that
+# should stay around 3 MB, so anything added here needs a reason.
+[dependencies]
+bhn-core = { path = "../../crates/bhn-core" }
+tauri = { version = "2", features = [] }
+# Native Open/Save sheets. Writing our own file browser in the webview would
+# be both bigger and worse than the one each OS already has.
+tauri-plugin-dialog = "2"
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
