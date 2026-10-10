@@ -375,6 +375,12 @@ fn install_update(app: tauri::AppHandle, path: String) -> CommandResult<()> {
 		return Err("the download is no longer there".into());
 	}
 
+	// macOS gets a real in-place update rather than a mounted disk image left
+	// sitting there: see `spawn_macos_updater`.
+	#[cfg(target_os = "macos")]
+	spawn_macos_updater(&path)?;
+
+	#[cfg(not(target_os = "macos"))]
 	installer_command(&path, &ext)
 		.spawn()
 		.map_err(|error| format!("could not start the installer: {error}"))?;
@@ -389,6 +395,93 @@ fn install_update(app: tauri::AppHandle, path: String) -> CommandResult<()> {
 	Ok(())
 }
 
+/// Replaces this application bundle with the one inside a downloaded disk
+/// image, then reopens it.
+///
+/// Opening the `.dmg` and letting the user drag works, but leaves the volume
+/// mounted afterwards — so Finder shows what looks like a second BHNotepad
+/// until it is ejected by hand, which is exactly the complaint this fixes.
+///
+/// The work is done by a small script that outlives this process, because the
+/// bundle being replaced is the one currently running. It waits for the app to
+/// exit, stages the new bundle beside the old one, swaps them, ejects the
+/// volume, clears up and reopens.
+///
+/// No quarantine stripping is involved: the disk image was fetched by this
+/// process rather than by a browser, so it carries no quarantine attribute and
+/// neither does anything copied out of it.
+#[cfg(target_os = "macos")]
+fn spawn_macos_updater(dmg: &std::path::Path) -> Result<(), String> {
+	let exe = std::env::current_exe().map_err(|e| format!("could not locate the app: {e}"))?;
+	// <bundle>/Contents/MacOS/<binary>
+	let bundle = exe
+		.parent()
+		.and_then(|p| p.parent())
+		.and_then(|p| p.parent())
+		.ok_or("could not work out where this app is installed")?;
+	if bundle.extension().and_then(|e| e.to_str()) != Some("app") {
+		return Err("this does not look like an installed app bundle".into());
+	}
+
+	let scratch = dmg
+		.parent()
+		.ok_or("the download has no folder")?
+		.to_path_buf();
+	let script = scratch.join("install.sh");
+
+	// Quoted with single quotes; the only paths interpolated are ones this
+	// process created or resolved, never anything from the network.
+	let body = format!(
+		r#"#!/bin/sh
+set -e
+DMG='{dmg}'
+BUNDLE='{bundle}'
+SCRATCH='{scratch}'
+
+# Wait for the app to finish quitting before touching its bundle.
+i=0
+while pgrep -f "$BUNDLE/Contents/MacOS/" >/dev/null 2>&1; do
+  i=$((i+1)); [ "$i" -gt 100 ] && break
+  sleep 0.1
+done
+
+MP=$(hdiutil attach -nobrowse -noautoopen -readonly "$DMG" | grep -o '/Volumes/.*' | tail -1)
+[ -n "$MP" ] || exit 1
+NEW="$MP/BHNotepad.app"
+
+if [ -d "$NEW" ]; then
+  # Stage beside the target first, so a failure leaves the old one intact.
+  rm -rf "$BUNDLE.new"
+  if ditto "$NEW" "$BUNDLE.new"; then
+    rm -rf "$BUNDLE"
+    mv "$BUNDLE.new" "$BUNDLE"
+  else
+    rm -rf "$BUNDLE.new"
+  fi
+fi
+
+hdiutil detach "$MP" >/dev/null 2>&1 || hdiutil detach "$MP" -force >/dev/null 2>&1 || true
+rm -rf "$SCRATCH"
+open "$BUNDLE"
+"#,
+		dmg = dmg.display(),
+		bundle = bundle.display(),
+		scratch = scratch.display(),
+	);
+
+	std::fs::write(&script, body).map_err(|e| format!("could not write the updater: {e}"))?;
+	std::process::Command::new("/bin/sh")
+		.arg(&script)
+		// Detached: it has to outlive the process it is replacing.
+		.stdin(std::process::Stdio::null())
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::null())
+		.spawn()
+		.map_err(|e| format!("could not start the updater: {e}"))?;
+	Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn installer_command(path: &std::path::Path, ext: &str) -> std::process::Command {
 	#[cfg(target_os = "windows")]
 	{
@@ -399,13 +492,6 @@ fn installer_command(path: &std::path::Path, ext: &str) -> std::process::Command
 			return command;
 		}
 		std::process::Command::new(path)
-	}
-	#[cfg(target_os = "macos")]
-	{
-		let _ = ext;
-		let mut command = std::process::Command::new("/usr/bin/open");
-		command.arg(path);
-		command
 	}
 	#[cfg(target_os = "linux")]
 	{

@@ -8,6 +8,10 @@ import { useState } from "react";
 
 import * as ipc from "./ipc";
 
+/** macOS replaces the app in place and reopens it; the others hand over to a
+ *  platform installer, which leaves BHNotepad closed. */
+const ON_MAC = navigator.platform.toLowerCase().includes("mac");
+
 interface Props {
   release: ipc.UpdateRelease;
   onDismiss: () => void;
@@ -59,16 +63,16 @@ export function UpdateBanner({ release, onDismiss, onProblem }: Props) {
           disabled={busy}
           onClick={() => {
             setBusy(true);
-            // This quits BHNotepad a moment later so the installer can
-            // replace it. Every tab is already on disk, so there is nothing
-            // to save first and nothing to ask about.
+            // BHNotepad quits a moment later so it can be replaced. Every
+            // tab is already on disk, so there is nothing to save first and
+            // nothing to ask about. On macOS it reopens itself afterwards.
             void ipc.installUpdate(saved).catch((error) => {
               setBusy(false);
               onProblem(error instanceof Error ? error.message : String(error));
             });
           }}
         >
-          {busy ? "Starting the installer…" : "Install and Quit"}
+          {busy ? "Installing…" : ON_MAC ? "Install and Restart" : "Install and Quit"}
         </button>
       )}
 

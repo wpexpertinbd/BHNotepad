@@ -513,3 +513,36 @@ running the installer is the right next step.
 
 Also fixed: **Help was sitting before View in the menu bar.** Help goes last, as it does in every
 other application. Spotted in a screenshot, not by a test.
+
+### v0.4.2 — the macOS update installs in place
+
+Benjamin, after using it: *"with finder I can see 2 apps remove older one & after installing new
+version it should unmount itself right? now its stay as mounted & better if we can reopen the apps
+after the update"*. All three are the same cause: `open`ing the `.dmg` mounts a volume, Finder then
+shows the app **inside that volume** alongside the installed one, and after the drag the volume
+stays mounted forever.
+
+**macOS now replaces the bundle itself** (`spawn_macos_updater`). A small script is written into
+the download's own scratch folder and spawned detached, because the bundle being replaced is the
+one currently running. It waits for the app to exit, mounts the image, `ditto`s the new bundle to
+`<bundle>.new`, swaps it in, ejects the volume, removes the scratch folder and reopens the app.
+⚠️ Staged as `.new` first **on purpose**: a failed copy then leaves the installed app untouched
+rather than deleting it and failing.
+
+⚠️ **No quarantine stripping is needed, and that is worth knowing.** `com.apple.quarantine` is
+applied by browsers and LaunchServices, not by arbitrary processes — our download comes through
+`ureq` and `std::fs`, so it carries none, and neither does anything copied out of it. Verified
+with `xattr`. This is what makes an in-place update defensible without a signature to check.
+
+Windows and Linux still hand over to the platform installer; the complaint was macOS-specific and
+`msiexec` already replaces in place.
+
+Verified end to end by running the exact script against a real v0.4.1 disk image: 0.0.1 → 0.4.1,
+zero mounted volumes afterwards, scratch folder gone, app relaunched, no stray `.new` bundle.
+
+### ⚠️ The release workflow created DRAFTS, and prune deleted the live release anyway
+This bit twice. `prune` removes the previous release once the new one has its installers — but a
+**draft is invisible**, so the Releases page was left with nothing downloadable until a human
+published by hand. Fixed two ways: the workflow now creates the release **published**
+(`--latest`, not `--draft`), and prune additionally refuses to run while the new release is still
+a draft. Fuller notes are edited in afterwards.

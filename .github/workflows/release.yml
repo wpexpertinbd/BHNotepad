@@ -127,10 +127,15 @@ jobs:
 
           printf 'found:\n'; printf '  %s\n' "${files[@]}"
 
+          # NOT a draft. The prune job below deletes the previous release once
+          # this one has its installers, and a draft is invisible to everyone
+          # — so creating this as a draft left the Releases page with nothing
+          # downloadable until a human published it by hand. That gap was real
+          # and happened twice.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --draft \
+            gh release create "$TAG" --latest \
               --title "BHNotepad $TAG" \
-              --notes "See the README for what is in this release. macOS builds are ad-hoc signed, not notarised: open System Settings › Privacy & Security and click Open Anyway the first time." \
+              --notes "Installers for macOS, Windows and Linux are attached below. macOS builds are ad-hoc signed, not notarised: open System Settings › Privacy & Security and click Open Anyway the first time. Fuller notes are usually edited in shortly after the build." \
               || true
           fi
           gh release upload "$TAG" "${files[@]}" --clobber
@@ -166,6 +171,15 @@ jobs:
                    2>/dev/null || echo 0)
           if [ "$dmgs" -lt 2 ]; then
             echo "::warning::$KEEP has $dmgs of 2 macOS installers — keeping the older releases"
+            exit 0
+          fi
+
+          # And it must actually be visible. Deleting the only downloadable
+          # release in favour of a draft is worse than keeping both.
+          draft=$(gh release view "$KEEP" --repo "$GITHUB_REPOSITORY" \
+                    --json isDraft -q '.isDraft' 2>/dev/null || echo true)
+          if [ "$draft" != "false" ]; then
+            echo "::warning::$KEEP is still a draft — keeping the older releases"
             exit 0
           fi
 
