@@ -20,9 +20,21 @@ import { Editor } from "./Editor";
 import { TabBar } from "./TabBar";
 import { MenuBar, ACCEL, ALT, SHIFT, type Menu } from "./MenuBar";
 import * as cmd from "./editorCommands";
+import { UpdateBanner } from "./UpdateBanner";
 import { FindDialog, type FindMode } from "./FindDialog";
 import { SELECTABLE, labelFor } from "./languages";
 import type { EditorView } from "@codemirror/view";
+
+/** Remembers which version the user waved away, so it cannot nag twice. */
+const DISMISSED_KEY = "bhnotepad.dismissedUpdate";
+
+function dismissedUpdate(): string | null {
+  try {
+    return localStorage.getItem(DISMISSED_KEY);
+  } catch {
+    return null;
+  }
+}
 
 /** Only used for naming the Trash in a message. */
 const ON_WINDOWS = navigator.platform.toLowerCase().startsWith("win");
@@ -40,6 +52,9 @@ export function App() {
   const [caret, setCaret] = useState<CaretInfo>({ line: 1, col: 1, selected: 0 });
   const [find, setFind] = useState<FindMode | null>(null);
   const [view, setView] = useState<EditorView | null>(null);
+  const [update, setUpdate] = useState<ipc.UpdateRelease | null>(null);
+  const [autoUpdate, setAutoUpdate] = useState(true);
+  const [version, setVersion] = useState("");
   /** Set by the Editor; writes the live text through, bypassing the debounce. */
   const flushEditor = useRef<(() => Promise<void>) | null>(null);
   /** Set by the Editor; drops a tab's parked document, used by Reload. */
@@ -156,6 +171,37 @@ export function App() {
       void failures.then((unlisten) => unlisten());
     };
   }, [fail]);
+
+  // What version is running, and whether automatic checks are wanted.
+  useEffect(() => {
+    void ipc
+      .limits()
+      .then((limits) => {
+        setVersion(limits.version);
+        setAutoUpdate(limits.auto_update_check);
+      })
+      .catch(() => {
+        // Not worth bothering anyone about; the menu just shows no version.
+      });
+  }, []);
+
+  // The check on launch. Returns null when it was skipped — because the user
+  // turned it off, or because the 24-hour throttle has not elapsed — and in
+  // that case nothing at all should be said.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const result = await ipc.checkUpdate(false);
+        if (!result?.update) return;
+        // A release the user already waved away stays waved away.
+        if (dismissedUpdate() === result.update.version) return;
+        setUpdate(result.update);
+      } catch {
+        // An automatic check that fails says nothing. Being offline is normal,
+        // and it is emphatically not the same as being up to date.
+      }
+    })();
+  }, []);
 
   // Restore the zoom level this machine was last left at.
   useEffect(() => {
@@ -445,6 +491,44 @@ export function App() {
     },
     [fail],
   );
+
+  const handleCheckUpdate = useCallback(async () => {
+    note("Checking for updates…");
+    try {
+      const result = await ipc.checkUpdate(true);
+      if (!result) return;
+      if (result.error) {
+        // Deliberately NOT "up to date" — that would be a different and much
+        // more misleading claim than "the check did not work".
+        fail("Could not check for updates", new Error(result.error));
+        return;
+      }
+      if (result.update) {
+        setUpdate(result.update);
+        note(`BHNotepad ${result.update.version} is available`);
+      } else {
+        note(`BHNotepad ${result.current} is the latest version`);
+      }
+    } catch (error) {
+      fail("Could not check for updates", error);
+    }
+  }, [fail, note]);
+
+  const handleToggleAutoUpdate = useCallback(async () => {
+    const next = !autoUpdate;
+    setAutoUpdate(next);
+    try {
+      await ipc.setAutoUpdate(next);
+      note(
+        next
+          ? "BHNotepad will check for updates on launch"
+          : "Automatic update checks are off — no network requests at all",
+      );
+    } catch (error) {
+      setAutoUpdate(!next);
+      fail("Could not change that setting", error);
+    }
+  }, [autoUpdate, fail, note]);
 
   const goToLine = useCallback(() => {
     if (view) cmd.editorGoToLine(view);
@@ -836,6 +920,32 @@ export function App() {
       ],
     },
     {
+      label: "Help",
+      items: [
+        { label: version ? `BHNotepad ${version}` : "BHNotepad", enabled: false },
+        {
+          label: "Check for Updates…",
+          separated: true,
+          run: () => void handleCheckUpdate(),
+        },
+        {
+          label: autoUpdate
+            ? "Check Automatically on Launch ✓"
+            : "Check Automatically on Launch",
+          run: () => void handleToggleAutoUpdate(),
+        },
+        {
+          label: "Releases & Source on GitHub",
+          separated: true,
+          run: () => {
+            void ipc
+              .openReleasePage("https://github.com/wpexpertinbd/BHNotepad/releases/latest")
+              .catch((error) => fail("Could not open the page", error));
+          },
+        },
+      ],
+    },
+    {
       label: "View",
       items: [
         { label: "Zoom In", shortcut: `${ACCEL}+`, run: () => cmd.zoomIn() },
@@ -872,6 +982,20 @@ export function App() {
   return (
     <div className="app">
       <MenuBar menus={menus} />
+      {update && (
+        <UpdateBanner
+          release={update}
+          onDismiss={() => {
+            try {
+              localStorage.setItem(DISMISSED_KEY, update.version);
+            } catch {
+              // Then it will offer again next launch, which is tolerable.
+            }
+            setUpdate(null);
+          }}
+          onProblem={(message) => fail("Update", new Error(message))}
+        />
+      )}
       <TabBar
         buffers={session.buffers}
         active={session.active}

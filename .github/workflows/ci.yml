@@ -44,6 +44,12 @@ jobs:
         # Includes the power-cut test, which spawns a child that aborts.
         run: cargo test -p bhn-core
 
+      - name: Tests (with the update checker)
+        # The shipped app builds this feature, so it has to be tested too —
+        # including the host allowlist that keeps a download on github.com.
+        # No test here reaches the network.
+        run: cargo test -p bhn-core --features updates
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

@@ -13,10 +13,24 @@ publicly.
 
 ## What BHNotepad does with your data
 
-Nothing leaves your machine.
+Nothing about you or your notes leaves your machine.
 
-- **No network access at all.** The app makes no HTTP requests, has no telemetry, no analytics,
-  no crash reporting and no update check.
+- **One network request, and only one.** On launch — at most once every 24 hours — and whenever
+  you use **Help → Check for Updates**, the app asks
+  `https://api.github.com/repos/wpexpertinbd/BHNotepad/releases/latest` whether there is a newer
+  version. That request carries a user agent (`BHNotepad/<version>`) and nothing else: no
+  identifier, no machine details, no file names, no usage data. GitHub will see your IP address
+  and the time, as it would for any visit to the site.
+- **You can switch it off.** **Help → Check Automatically on Launch**, stored as
+  `auto_update_check` in `settings.json`. With it off, and if you never press Check for Updates,
+  BHNotepad makes no network request of any kind.
+- **No telemetry, no analytics, no crash reporting, ever** — those are not off by default, they
+  do not exist.
+- **Updates are never installed behind your back.** The installer is downloaded to your Downloads
+  folder and shown in your file manager; opening it is your decision. A download URL is accepted
+  only if its host is exactly `github.com` or `objects.githubusercontent.com`, so a tampered API
+  answer cannot point the download elsewhere. This is an exact match, not a prefix — there is a
+  test for `github.com.evil.example.com`.
 - **Your notes stay in your user folder** — `~/Library/Application Support/BHNotepad` on macOS,
   `%APPDATA%\BHNotepad` on Windows, `${XDG_CONFIG_HOME:-~/.config}/BHNotepad` on Linux — in plain
   text, readable by you and by anything else running as you.

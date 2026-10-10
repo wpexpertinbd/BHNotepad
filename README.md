@@ -8,6 +8,7 @@ before you are allowed to quit. Notepad++ on Windows does not, and that is the o
 has no equivalent on macOS or Linux — so this is it.
 
 **Free, open source (MIT), no telemetry, no account, ~3 MB.**
+The only thing it ever sends is an update check to GitHub, and you can turn that off.
 macOS · Windows · Linux.
 
 ---
@@ -66,6 +67,10 @@ and checks all six tabs and their text came back.
   in Finder or Explorer — BHNotepad registers itself for about 70 text and source extensions.
 - **Line endings are preserved**: a Windows file is written back with CRLF, so a one-word change
   does not show up as a diff touching every line.
+- **Update checking** — on launch (at most once a day), or on demand from the Help menu. It asks
+  GitHub's releases API for the newest tag and nothing else: no identifier, no usage data, no
+  telemetry. **Help → Check Automatically on Launch** turns it off, and with it off the app makes
+  no network request of any kind.
 - **A menu bar** — File, Edit, Search, View — with the operations a Notepad++ user reaches for:
   Open Recent, Reload from Disk, Rename, Save a Copy As, Show in Finder/Explorer, Move to Trash,
   Close All but This / to the Left / to the Right, and the line operations (duplicate, delete,

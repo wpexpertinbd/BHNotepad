@@ -438,3 +438,49 @@ skipped `remember_recent`, so a file you kept coming back to sank down the Open 
 Cmd+Shift+T brings a closed tab back with its text, language and path.
 ⚠️ The menus themselves cannot be opened by the background automation tools (macOS reports them
 as pop-up controls), so they were verified by shortcut and by the accessibility tree instead.
+
+---
+
+## 🔄 v0.4.0 — update checking, 2026-10-10
+
+Benjamin asked for an update checker "as like BHServe or others app we have", then corrected me
+that **BHUninstaller has one too** — he was right and my first search was broken (zsh ate the
+`--include=*.rs` glob and the grep silently never ran). ⚠️ When a `grep -r --include=...` prints
+"no matches found" under zsh, that is the SHELL failing, not an empty result.
+
+The house pattern lives in **`BHUninstaller/crates/bhu-core/src/selfupdate.rs`** and
+**`BHServe/macos/Sources/BHServe/AppState.swift`**. Both were read and followed:
+
+- **Only GitHub, exact host match.** A download URL is accepted only when its host is exactly
+  `github.com` or `objects.githubusercontent.com`. ⚠️ `starts_with` would accept
+  **`github.com.evil.example.com`** — there is a test, and it fails if the check is weakened.
+- **Numbers, not strings.** `0.10` is newer than `0.9`; text comparison says otherwise.
+- **A failed check is NEVER "up to date".** Being offline is normal; turning that into
+  reassurance is a different and far more misleading statement. Separate `error` field.
+- **Throttled to 24 h.** GitHub's unauthenticated API is **60 requests/hour per IP**, shared by
+  everyone behind it. The timestamp is stamped *before* the request so a failure backs off too.
+- **Nothing installs itself.** The installer is downloaded and revealed in the file manager.
+
+### Decisions
+- **HTTP in Rust (`ureq` + rustls), not the webview.** Doing it in the frontend would have been
+  free in binary size but required adding `api.github.com` to the CSP `connect-src`, giving a
+  compromised webview a network egress it currently does not have. **Measured cost of the Rust
+  route: app 3.8 → 4.7 MB, dmg 2.04 → 2.6 MB.** Worth it; the CSP stays closed.
+- **`updates` is a Cargo FEATURE on bhn-core**, matching BHUninstaller. Off by default so the
+  core stays dependency-light and so its tests can never reach the network.
+  ⚠️ The `checkupdate` example needs `required-features = ["updates"]`, or CI's plain
+  `cargo test -p bhn-core` fails to compile it. CI now runs the suite both ways.
+- **The lock is not held across the network call** — a 15-second timeout with the workspace
+  mutex held would freeze every keystroke.
+- **A banner, not a modal.** Dismissal is remembered per version in `localStorage`, so one
+  release cannot nag twice.
+
+### ⚠️ The README and SECURITY.md both claimed "no network access at all"
+That became false the moment this shipped. Both were rewritten to say exactly what is sent
+(a user agent and nothing else), when, what GitHub can see (IP and time), and how to turn it off
+(`Help → Check Automatically on Launch`, `auto_update_check` in `settings.json`). **If the
+network behaviour ever changes again, those two files change in the same commit.**
+
+Verified against the real release: running 0.3.0 reports "already the latest version"; pretending
+to be 0.0.1 finds v0.3.0 and picks `BHNotepad_0.3.0_aarch64.dmg` — the right architecture, not
+whichever asset sorted first. 112 tests.

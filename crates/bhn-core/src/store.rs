@@ -308,6 +308,12 @@ impl Store {
         }
     }
 
+    /// Atomically writes a file inside the store. Used by the settings file,
+    /// which wants the same crash-safety as everything else here.
+    pub fn write_text(&self, path: &Path, data: &[u8]) -> Result<()> {
+        write_atomic(path, data)
+    }
+
     pub fn save_session(&self, session: &Session) -> Result<()> {
         // Pretty-printed: this file is small, and being able to read or repair
         // it by hand has already proved useful.

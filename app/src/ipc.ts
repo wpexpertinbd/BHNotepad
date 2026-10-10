@@ -87,7 +87,36 @@ export const flush = () => invoke<void>("flush");
 export interface Limits {
   max_open_bytes: number;
   settings_path: string;
+  auto_update_check: boolean;
+  version: string;
 }
+
+export interface UpdateRelease {
+  version: string;
+  notes: string;
+  page_url: string;
+  asset_name: string | null;
+  asset_url: string | null;
+  asset_size: number;
+}
+
+export interface UpdateCheck {
+  update: UpdateRelease | null;
+  current: string;
+  /** Why the check failed. NEVER treat this as "up to date". */
+  error: string | null;
+}
+
+/** `manual` checks always run; automatic ones respect the setting and the
+ *  24-hour throttle, and return null when they were skipped. */
+export const checkUpdate = (manual: boolean) =>
+  invoke<UpdateCheck | null>("check_update", { manual });
+export const setAutoUpdate = (enabled: boolean) =>
+  invoke<void>("set_auto_update", { enabled });
+export const downloadUpdate = (release: UpdateRelease) =>
+  invoke<string>("download_update", { release });
+export const openReleasePage = (url: string) =>
+  invoke<void>("open_release_page", { url });
 export const limits = () => invoke<Limits>("limits");
 
 /**

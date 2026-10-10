@@ -31,6 +31,24 @@ pub struct Settings {
     /// the editor leaves the tab unable to display anything.
     #[serde(default = "default_max_open_bytes")]
     pub max_open_bytes: u64,
+    /// Whether to look for a new release on launch.
+    ///
+    /// On by default, and genuinely switchable — turning it off means the app
+    /// makes no network request of any kind, which is the state it shipped in
+    /// before this existed.
+    #[serde(default = "default_true")]
+    pub auto_update_check: bool,
+    /// When the last automatic check ran, as seconds since the epoch.
+    ///
+    /// Persisted so the 24-hour throttle survives a restart; otherwise every
+    /// launch would be a fresh request against a limit that is shared by
+    /// everyone on the same IP.
+    #[serde(default)]
+    pub last_update_check: i64,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_max_open_bytes() -> u64 {
@@ -41,6 +59,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             max_open_bytes: DEFAULT_MAX_OPEN_BYTES,
+            auto_update_check: true,
+            last_update_check: 0,
         }
     }
 }
@@ -51,6 +71,15 @@ impl Settings {
         if self.max_open_bytes < MIN_MAX_OPEN_BYTES {
             self.max_open_bytes = MIN_MAX_OPEN_BYTES;
         }
+    }
+
+    /// Writes the settings file.
+    ///
+    /// Atomic, like everything else in the store: a settings file truncated by
+    /// a crash would silently reset the size limit and the update preference.
+    pub fn save(&self, store: &Store) -> Result<(), crate::StoreError> {
+        let text = serde_json::to_string_pretty(self).expect("Settings is always serializable");
+        store.write_text(&store.root().join("settings.json"), text.as_bytes())
     }
 
     /// Reads the settings file, falling back to defaults.
@@ -126,6 +155,37 @@ mod tests {
         let (settings, note) = Settings::load(&store);
         assert_eq!(settings.max_open_bytes, DEFAULT_MAX_OPEN_BYTES);
         assert!(note.unwrap().contains("could not be read"));
+    }
+
+    #[test]
+    fn the_update_preference_round_trips() {
+        let (_dir, store) = store();
+        let mut settings = Settings::default();
+        assert!(settings.auto_update_check, "on by default");
+
+        settings.auto_update_check = false;
+        settings.last_update_check = 1_700_000_000;
+        settings.save(&store).unwrap();
+
+        let (loaded, note) = Settings::load(&store);
+        assert!(note.is_none());
+        assert!(!loaded.auto_update_check, "turning it off must stick");
+        assert_eq!(loaded.last_update_check, 1_700_000_000);
+    }
+
+    #[test]
+    fn an_older_settings_file_keeps_working() {
+        // A file written before the update checker existed has neither field.
+        let (_dir, store) = store();
+        std::fs::write(
+            store.root().join("settings.json"),
+            r#"{"max_open_bytes": 268435456}"#,
+        )
+        .unwrap();
+        let (loaded, note) = Settings::load(&store);
+        assert!(note.is_none());
+        assert_eq!(loaded.max_open_bytes, 256 * 1024 * 1024);
+        assert!(loaded.auto_update_check, "and gets the default");
     }
 
     #[test]

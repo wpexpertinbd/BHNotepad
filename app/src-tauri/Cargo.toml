@@ -19,7 +19,7 @@ tauri-build = { version = "2", features = [] }
 # Kept deliberately short. Every dependency is weight in an installer that
 # should stay around 3 MB, so anything added here needs a reason.
 [dependencies]
-bhn-core = { path = "../../crates/bhn-core" }
+bhn-core = { path = "../../crates/bhn-core", features = ["updates"] }
 tauri = { version = "2", features = [] }
 # Native Open/Save sheets. Writing our own file browser in the webview would
 # be both bigger and worse than the one each OS already has.

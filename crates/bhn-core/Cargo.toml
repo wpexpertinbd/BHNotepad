@@ -10,10 +10,23 @@ repository.workspace = true
 # No `tauri`, and nothing platform-specific. This crate is the part that ports
 # unchanged to Windows and Linux; the shell injects the config directory rather
 # than the core discovering it. See CLAUDE.md.
+[features]
+# The network half of the update check. Off by default so the core stays
+# dependency-light and its tests can never reach the network.
+updates = ["dep:ureq"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# rustls rather than the system TLS: one less thing that differs per platform.
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+
+# The example reaches the network, so it must not be built by a plain
+# `cargo test` — CI runs that without the feature and would fail to compile.
+[[example]]
+name = "checkupdate"
+required-features = ["updates"]
 
 [dev-dependencies]
 tempfile = "3"

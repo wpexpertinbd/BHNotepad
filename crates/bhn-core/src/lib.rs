@@ -14,6 +14,7 @@ pub mod language;
 pub mod session;
 pub mod settings;
 pub mod store;
+pub mod update;
 
 pub use language::detect as detect_language;
 pub use session::{Buffer, ClosedTab, Session, SESSION_VERSION};
@@ -121,6 +122,16 @@ impl Workspace {
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Changes a setting and writes it out.
+    pub fn update_settings(
+        &mut self,
+        change: impl FnOnce(&mut Settings),
+    ) -> Result<(), StoreError> {
+        change(&mut self.settings);
+        self.settings.normalize();
+        self.settings.save(&self.store)
     }
 
     /// A tab's text, from wherever the authoritative copy lives.

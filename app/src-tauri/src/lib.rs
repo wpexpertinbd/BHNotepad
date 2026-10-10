@@ -288,11 +288,91 @@ fn move_to_trash(state: State<'_, AppState>, id: String) -> CommandResult<Sessio
 	Ok(workspace.session().clone())
 }
 
+// ── Update checking ──────────────────────────────────────────────────────
+
+/// Looks for a newer release.
+///
+/// `manual` is the difference between the user asking and the app asking on
+/// launch. A manual check always runs and always reports what happened; an
+/// automatic one respects the user's preference and the 24-hour throttle, and
+/// stays quiet unless there is genuinely something new.
+///
+/// ⚠️ A failed check must never be reported as "up to date" — see the rules in
+/// `bhn_core::update`.
+#[tauri::command]
+fn check_update(
+	state: State<'_, AppState>,
+	manual: bool,
+) -> CommandResult<Option<bhn_core::update::CheckResult>> {
+	{
+		let workspace = state.workspace.lock().map_err(to_message)?;
+		let settings = workspace.settings();
+		if !manual {
+			if !settings.auto_update_check {
+				return Ok(None);
+			}
+			if !bhn_core::update::check_due(settings.last_update_check) {
+				return Ok(None);
+			}
+		}
+	}
+
+	// Stamp the time BEFORE the request, so a failure backs off too rather
+	// than retrying on every launch.
+	if !manual {
+		let mut workspace = state.workspace.lock().map_err(to_message)?;
+		let now = bhn_core::update::now_secs();
+		workspace
+			.update_settings(|s| s.last_update_check = now)
+			.map_err(to_message)?;
+	}
+
+	// The lock is deliberately NOT held across the network call: a 15-second
+	// timeout with the workspace locked would freeze every keystroke.
+	Ok(Some(bhn_core::update::check()))
+}
+
+#[tauri::command]
+fn set_auto_update(state: State<'_, AppState>, enabled: bool) -> CommandResult<()> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	workspace
+		.update_settings(|s| s.auto_update_check = enabled)
+		.map_err(to_message)
+}
+
+/// Downloads a release's installer and shows it in the file manager.
+///
+/// Nothing is run. On macOS the user has to go through Open Anyway for an
+/// unsigned build in any case, so installing is their step by necessity as
+/// well as by choice.
+#[tauri::command]
+fn download_update(release: bhn_core::update::Release) -> CommandResult<String> {
+	let into = dirs::download_dir().unwrap_or_else(|| {
+		dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Downloads")
+	});
+	let saved = bhn_core::update::download(&release, into)?;
+	let _ = tauri_plugin_opener::reveal_item_in_dir(&saved);
+	Ok(saved.to_string_lossy().into_owned())
+}
+
+/// Opens a release page in the user's browser.
+#[tauri::command]
+fn open_release_page(url: String) -> CommandResult<()> {
+	// Only github.com, so a tampered API answer cannot send the user
+	// somewhere else entirely.
+	if !url.starts_with("https://github.com/") {
+		return Err("that link is not on github.com".into());
+	}
+	tauri_plugin_opener::open_url(url, None::<&str>).map_err(to_message)
+}
+
 /// The size limit and where to change it, for the status bar's message.
 #[derive(Serialize)]
 struct Limits {
 	max_open_bytes: u64,
 	settings_path: String,
+	auto_update_check: bool,
+	version: String,
 }
 
 #[tauri::command]
@@ -300,6 +380,8 @@ fn limits(state: State<'_, AppState>) -> CommandResult<Limits> {
 	let workspace = state.workspace.lock().map_err(to_message)?;
 	Ok(Limits {
 		max_open_bytes: workspace.settings().max_open_bytes,
+		auto_update_check: workspace.settings().auto_update_check,
+		version: env!("CARGO_PKG_VERSION").to_string(),
 		settings_path: workspace
 			.store()
 			.root()
@@ -490,6 +572,10 @@ pub fn run() {
 			close_to_right,
 			reveal,
 			move_to_trash,
+			check_update,
+			set_auto_update,
+			download_update,
+			open_release_page,
 		])
 		.build(tauri::generate_context!())
 		.expect("BHNotepad failed to start")

@@ -618,3 +618,57 @@ body {
   padding: 3px 7px;
   margin-right: 4px;
 }
+
+/* ── Update banner ────────────────────────────────────────────────────────
+ * A strip, not a modal. An editor that interrupts you to talk about itself is
+ * worse than one that waits. */
+
+.updatebar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+}
+
+.updatebar-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.updatebar button {
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: transparent;
+  color: #fff;
+  border-radius: 5px;
+  padding: 2px 9px;
+  font: 11.5px var(--ui);
+  cursor: default;
+  flex: 0 0 auto;
+}
+
+.updatebar button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.updatebar button:disabled {
+  opacity: 0.6;
+}
+
+.updatebar-primary {
+  background: rgba(255, 255, 255, 0.2) !important;
+  border-color: rgba(255, 255, 255, 0.75) !important;
+  font-weight: 600;
+}
+
+.updatebar-close {
+  border: 0 !important;
+  font-size: 15px;
+  line-height: 1;
+  padding: 1px 6px !important;
+}
