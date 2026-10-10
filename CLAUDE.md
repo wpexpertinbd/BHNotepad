@@ -612,3 +612,24 @@ fails — while running `bundle_dmg.sh` **by hand succeeds**, which is the tell 
 environmental rather than a config problem. Clear them with
 `for v in /Volumes/dmg.*; do hdiutil detach "$v"; done` and delete any `rw.*.dmg` staging images.
 CI is unaffected: runners are fresh.
+
+### v0.4.4 — Save All tested at last, and a bug it found
+
+Benjamin asked for the one feature that had never been clicked through end to end. It works: with
+two untitled tabs, `Cmd/Ctrl+Shift+S` asks for the **first** tab (not the active one), then asks
+for the second, renames both, clears their dirty dots and reports "Saved 2". Files were compared
+to the tab contents **byte for byte**, not merely checked for existence.
+
+**The bug it found:** running Save All again with nothing unsaved reported *"Saved 1"* and
+rewrote an unchanged file. `flushEditor` wrote unconditionally, which marked the active tab dirty
+even when its text had not changed, and the Save All loop then "saved" it. The flush now returns
+early when `textTimer` is null — no pending timer means the store is already current. Verified by
+**file modification times being identical before and after**, which is the only measure that
+cannot be faked by a hopeful status message.
+
+⚠️ **A false alarm worth remembering.** The first run looked like a truncation bug — a file saved
+as `"first untitled note -"` instead of the whole sentence. It was not the app: the **editor
+itself** had only received 17 characters (status bar read `Ln 1, Col 18`), because `app_type`
+delivers text faster than the webview accepts it. Editor, snapshot and saved file agreed at every
+point. ⚠️ When UI automation produces a surprising result, check what the app actually
+*received* before believing the app is wrong.

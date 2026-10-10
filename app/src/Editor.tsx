@@ -230,10 +230,14 @@ export function Editor({
     // debounce. Save calls this before asking the core to write the file,
     // because the core saves what is in the STORE, not what is on screen.
     const flush = async () => {
-      if (textTimer.current !== null) {
-        window.clearTimeout(textTimer.current);
-        textTimer.current = null;
-      }
+      // Only when something is actually waiting to be written. Flushing
+      // unconditionally marked the current tab dirty even when its text had
+      // not changed, so Save All re-saved an unchanged file and then reported
+      // "Saved 1" with nothing to save. No pending timer means the store is
+      // already current.
+      if (textTimer.current === null) return;
+      window.clearTimeout(textTimer.current);
+      textTimer.current = null;
       pendingSince.current = null;
       const id = currentId.current;
       if (!id) return;
