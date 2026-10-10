@@ -7,11 +7,17 @@ That is the whole point. Every other editor treats an unsaved buffer as a proble
 before you are allowed to quit. Notepad++ on Windows does not, and that is the one habit that
 has no equivalent on macOS or Linux — so this is it.
 
-**Free, open source (MIT), no telemetry, no account, ~3 MB.**
+**Free, open source (MIT), no telemetry, no account.** A 2–3 MB download, under 5 MB installed.
 The only thing it ever sends is an update check to GitHub, and you can turn that off.
 macOS · Windows · Linux.
 
 ---
+
+![BHNotepad on macOS](docs/screenshots/editor.png)
+
+*Three scratch notes and three real files, side by side. The dots mean those tabs live in your
+session rather than in a file — which is the normal resting state here, not a warning. Quit now
+and they all come back.*
 
 ## ✨ Why
 

@@ -546,3 +546,34 @@ This bit twice. `prune` removes the previous release once the new one has its in
 published by hand. Fixed two ways: the workflow now creates the release **published**
 (`--latest`, not `--draft`), and prune additionally refuses to run while the new release is still
 a draft. Fuller notes are edited in afterwards.
+
+---
+
+## 📸 The README screenshot — how it was taken (2026-10-11)
+
+`docs/screenshots/editor.png`, embedded near the top of the README. Same convention as
+BHUninstaller (`docs/screenshots/`).
+
+**Composing the shot without UI automation:** the app's state was **seeded directly into the
+session store** — `session.json` plus `buffers/<id>.txt` — and then the app was launched to
+restore it. Far more reliable than driving the UI, and it allowed an exact composition: three
+scratch tabs with dirty dots beside three real files, the active tab a *scratch* note with
+`language: "sql"` so it shows syntax highlighting **and** the status bar line that sells the app
+("Not saved to a file — kept in your session"). `auto_update_check` was turned off in the seeded
+settings so the update banner would not cover the window.
+
+**Capturing it safely**, per the standing rule that no screenshot may contain the Claude window:
+1. Window bounds from `osascript` (System Events `position` + `size` of window 1).
+2. The shutter fired **detached** — `nohup bash -c 'sleep 6; osascript … activate; sleep 3;
+   screencapture -x -o -R x,y,w,h out.png' &` — because any Bash call pulls Claude Code to the
+   front, so nothing may be in flight when it fires.
+3. **The PNG was opened and looked at** before committing. Non-negotiable.
+
+⚠️ That look caught a real defect the first time: a stray `a` had leaked into line 1 of the
+buffer (status bar read `Ln 1, Col 2`), which would have shipped a typo into the README. The
+second capture also shortened the window to 1040×560 so the content filled the frame instead of
+floating in white space.
+
+⚠️ `Quartz`/pyobjc is **not** available on this Mac, so `screencapture -l <CGWindowID>` — the
+nicest method, since nothing can overlap a single-window capture — was not usable. `-R` with
+bounds plus a detached shutter is the fallback.
