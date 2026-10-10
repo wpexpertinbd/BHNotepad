@@ -124,9 +124,16 @@ Click **More info → Run anyway**. The installer is per-user and needs no admin
 - **A file that is not valid UTF-8 can be read but not saved in place.** The bytes that could not
   be decoded are shown as replacement characters, and writing those back would destroy them, so
   Save over the original is refused and Save As is offered. Proper encoding support is a later job.
-- **Files are capped at 64 MB.** Opening is unbounded otherwise, and the text is held in memory,
-  handed to the editor and snapshotted on every autosave — a cap is the honest limit rather than
-  a hang. Very large files are not this editor's strength in any case.
+- **Files are capped at 512 MB**, and that number is measured rather than guessed. On a 24 GB
+  Apple-silicon machine: 512 MB opens in about seven seconds and is fully editable; 768 MB
+  displays but runs out of memory when it tries to save; 1 GB never finishes arriving in the
+  editor at all. The limit is the largest size known to work.
+
+  Raise it by putting `{"max_open_bytes": 805306368}` in `settings.json` in the folder listed
+  above — but understand what you are buying: above roughly 512 MB the text stops fitting through
+  the boundary between the Rust side and the editor, and that is a property of the architecture,
+  not a number anyone can tune away. Editing a multi-gigabyte dump is a job for `sed`, a database
+  client, or a native editor built on Scintilla.
 
 ## 🔨 Building
 

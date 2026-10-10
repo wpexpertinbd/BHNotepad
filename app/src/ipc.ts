@@ -61,6 +61,28 @@ export const setLanguage = (id: string, language: string) =>
 export const detectLanguage = (path: string) => invoke<string>("detect_language", { path });
 export const flush = () => invoke<void>("flush");
 
+export interface Limits {
+  max_open_bytes: number;
+  settings_path: string;
+}
+export const limits = () => invoke<Limits>("limits");
+
+/**
+ * Wraps a command so it cannot hang forever.
+ *
+ * A file too large to cross the IPC boundary left the tab sitting on
+ * "Loading…" with no error and no way out — worse than a refusal. Nothing here
+ * should take a minute; if it does, say so.
+ */
+export function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  return Promise.race([
+    work,
+    new Promise<T>((_resolve, reject) =>
+      setTimeout(() => reject(new Error(`${what} did not finish within ${ms / 1000}s`)), ms),
+    ),
+  ]);
+}
+
 /**
  * Writes a tab's text through to disk.
  *

@@ -67,10 +67,21 @@ export function App() {
     async (id: string) => {
       if (texts[id] !== undefined) return;
       try {
-        const body = await ipc.bufferText(id);
+        // Bounded: a document too large to cross the IPC boundary used to
+        // leave this tab on "Loading…" indefinitely.
+        const body = await ipc.withTimeout(
+          ipc.bufferText(id),
+          60_000,
+          "Loading that file",
+        );
         setTexts((all) => (all[id] !== undefined ? all : { ...all, [id]: body }));
+        // An empty result is a legitimate answer; marking the tab loaded is
+        // what takes it off the loading state either way.
       } catch (error) {
         fail("Could not read that tab", error);
+        // Give the tab SOMETHING so it stops saying "Loading…" forever. The
+        // status bar carries the reason.
+        setTexts((all) => (all[id] !== undefined ? all : { ...all, [id]: "" }));
       }
     },
     [texts, fail],
@@ -119,6 +130,11 @@ export function App() {
   // them to this one. The Rust side has already opened them; this just picks
   // up the new session.
   useEffect(() => {
+    // A file that could not be opened — too large, unreadable, gone. The tab
+    // never appears, so the status bar is the only place this can surface.
+    const failures = listen<string>("bhnotepad://open-failed", (event) => {
+      setStatus(String(event.payload));
+    });
     const pending = listen("bhnotepad://session-changed", () => {
       void (async () => {
         try {
@@ -131,6 +147,7 @@ export function App() {
     });
     return () => {
       void pending.then((unlisten) => unlisten());
+      void failures.then((unlisten) => unlisten());
     };
   }, [fail]);
 

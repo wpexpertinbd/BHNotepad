@@ -12,22 +12,21 @@
 
 pub mod language;
 pub mod session;
+pub mod settings;
 pub mod store;
 
 pub use language::detect as detect_language;
 pub use session::{Buffer, Session, SESSION_VERSION};
+pub use settings::Settings;
 pub use store::{new_id, Store, StoreError};
 
 use std::fs;
 use std::path::Path;
 
-/// Largest file that may be opened into a tab.
+/// Largest file that may be opened, unless the settings file says otherwise.
 ///
-/// Not a performance promise — a safety ceiling. The text is held in memory,
-/// copied across to the editor, and snapshotted on every autosave, so an
-/// unbounded read is a way to wedge the app rather than a feature. Generous
-/// enough for any log or source file someone would genuinely want to edit.
-pub const MAX_OPEN_BYTES: u64 = 64 * 1024 * 1024;
+/// Re-exported for convenience; the authority is [`settings::Settings`].
+pub use settings::DEFAULT_MAX_OPEN_BYTES as MAX_OPEN_BYTES;
 
 /// Formats a byte count for an error the user will actually read.
 fn human_bytes(bytes: u64) -> String {
@@ -52,6 +51,7 @@ fn human_bytes(bytes: u64) -> String {
 pub struct Workspace {
     store: Store,
     session: Session,
+    settings: Settings,
 }
 
 impl Workspace {
@@ -63,7 +63,12 @@ impl Workspace {
     pub fn open(root: impl AsRef<Path>) -> Result<(Self, Option<String>), StoreError> {
         let store = Store::new(root.as_ref())?;
         let (session, note) = store.load_session();
-        let mut workspace = Self { store, session };
+        let (settings, settings_note) = Settings::load(&store);
+        let mut workspace = Self {
+            store,
+            session,
+            settings,
+        };
 
         // ⚠️ Do NOT simply prune here. `load_session` yields an empty session
         // for a file that is corrupt OR missing, and pruning against an empty
@@ -74,6 +79,13 @@ impl Workspace {
         // crash or outside interference, and the text in it is worth more
         // than the tidiness of the directory.
         let recovered = workspace.recover_orphans()?;
+        // A settings problem is worth saying out loud too, but it must never
+        // take precedence over a note about the notes themselves.
+        let note = match (note, settings_note) {
+            (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
         let note = match (note, recovered) {
             (existing, 0) => existing,
             (Some(existing), n) => Some(format!(
@@ -105,6 +117,26 @@ impl Workspace {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// A tab's text, from wherever the authoritative copy lives.
+    ///
+    /// A saved file with no unsaved edits is NOT duplicated into the store —
+    /// the file on disk is already the copy, and snapshotting it would mean
+    /// writing a second 512 MB on open and keeping it there. Such a tab is
+    /// re-read from the file; everything else comes from its snapshot.
+    fn contents(&self, buffer: &Buffer) -> Result<String, StoreError> {
+        match (&buffer.path, buffer.dirty) {
+            (Some(path), false) => {
+                let bytes = read_capped(Path::new(path), self.settings.max_open_bytes)?;
+                Ok(store::decode_file(bytes).text)
+            }
+            _ => self.store.read_buffer(&buffer.id),
+        }
     }
 
     /// Turns snapshots the session does not reference back into tabs.
@@ -183,9 +215,12 @@ impl Workspace {
         self.store.save_session(&self.session)
     }
 
-    /// Reads a tab's text back from its snapshot.
+    /// Reads a tab's text from wherever its authoritative copy lives.
     pub fn text(&self, id: &str) -> Result<String, StoreError> {
-        self.store.read_buffer(id)
+        match self.session.buffer(id) {
+            Some(buffer) => self.contents(buffer),
+            None => Ok(String::new()),
+        }
     }
 
     /// Adds an empty scratch tab and focuses it. Returns its id.
@@ -216,17 +251,20 @@ impl Workspace {
 
         if let Some(index) = self.session.index_of_path(&path_string) {
             self.session.active = index;
-            let id = self.session.buffers[index].id.clone();
-            let text = self.store.read_buffer(&id)?;
+            let buffer = self.session.buffers[index].clone();
+            // `contents`, not the snapshot: a clean file-backed tab has none.
+            // Any unsaved edits in that tab win over what is on disk, which is
+            // what the user expects when re-opening a file they are editing.
+            let text = self.contents(&buffer)?;
             self.persist()?;
-            return Ok((id, text));
+            return Ok((buffer.id, text));
         }
 
         // Read through ONE handle and re-check its metadata from that handle.
         // Checking the path and then reading the path resolves it twice, so a
         // file that is swapped for a symlink to /dev/zero in between would be
         // read unbounded despite having passed the check.
-        let bytes = read_capped(path_ref, MAX_OPEN_BYTES)?;
+        let bytes = read_capped(path_ref, self.settings.max_open_bytes)?;
         let decoded = store::decode_file(bytes);
         let text = decoded.text;
 
@@ -236,7 +274,11 @@ impl Workspace {
         buffer.lossy = decoded.lossy;
         self.session.buffers.push(buffer);
         self.session.active = self.session.buffers.len() - 1;
-        self.store.write_buffer(&id, &text)?;
+        // Deliberately NO snapshot here. The file on disk is already the copy,
+        // so writing one would mean a second 512 MB on open and 512 MB sitting
+        // in the store for a file the user has not even edited. A snapshot
+        // appears the moment it is edited, and `contents` re-reads the file
+        // until then.
         self.persist()?;
         Ok((id, text))
     }
@@ -337,23 +379,32 @@ impl Workspace {
         // did not understand became replacement characters, and writing those
         // back would destroy them for good. Saving ELSEWHERE is still allowed,
         // so the user can rescue what we did manage to read.
-        let buffer = self.session.buffer(id);
-        let lossy = buffer.map(|b| b.lossy).unwrap_or(false);
-        let original = buffer.and_then(|b| b.path.clone());
+        // Cloned so the buffer can be consulted while `contents` borrows self.
+        let buffer = self.session.buffer(id).cloned();
+        let lossy = buffer.as_ref().map(|b| b.lossy).unwrap_or(false);
+        let original = buffer.as_ref().and_then(|b| b.path.clone());
         if lossy && original.as_deref() == Some(target.as_str()) {
             return Err(StoreError::Io {
                 context: format!(
-                    "{} is not UTF-8 and parts of it could not be read, so saving over it                      would destroy them — use Save As to write a copy instead",
-                    target
+                    "{target} is not UTF-8 and parts of it could not be read, so saving \
+                     over it would destroy them — use Save As to write a copy instead"
                 ),
                 source: std::io::Error::new(std::io::ErrorKind::InvalidData, "lossy decode"),
             });
         }
 
         let eol = buffer
+            .as_ref()
             .map(|b| b.eol.clone())
             .unwrap_or_else(|| "lf".to_string());
-        let text = self.store.read_buffer(id)?;
+        // Through `contents`, NOT the snapshot. A saved file with no unsaved
+        // edits has no snapshot at all now, and reading one would write an
+        // empty file over the user's data — which a test caught doing exactly
+        // that.
+        let text = match &buffer {
+            Some(b) => self.contents(b)?,
+            None => self.store.read_buffer(id)?,
+        };
         // Put the file's own line endings back. The editor normalises to LF,
         // so without this a one-word change to a Windows file rewrites every
         // line in it.
@@ -544,7 +595,8 @@ fn read_capped(path: &Path, limit: u64) -> Result<Vec<u8>, StoreError> {
     if meta.len() > limit {
         return Err(fail(
             format!(
-                "{} is {} and the limit is {}",
+                "{} is {} and the limit is {} — raise max_open_bytes in settings.json \
+                 if you need more, but very large files may not open at all",
                 path.display(),
                 human_bytes(meta.len()),
                 human_bytes(limit)
@@ -1285,6 +1337,131 @@ mod tests {
             leftovers.is_empty(),
             "and no temp file left behind: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn an_opened_file_is_not_copied_into_the_store() {
+        // Opening a 512 MB dump used to write a second 512 MB into the store
+        // for a file the user had not even edited.
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("big.sql");
+        fs::write(&file, "select 1;\nselect 2;\n").unwrap();
+
+        let (id, text) = workspace.open_path(&file).unwrap();
+        assert_eq!(text, "select 1;\nselect 2;\n");
+        assert!(
+            !workspace
+                .store()
+                .buffers_dir()
+                .join(format!("{id}.txt"))
+                .exists(),
+            "a clean file-backed tab should have no snapshot at all"
+        );
+        // And it still reads back, by going to the file.
+        assert_eq!(workspace.text(&id).unwrap(), "select 1;\nselect 2;\n");
+    }
+
+    #[test]
+    fn editing_a_file_backed_tab_does_create_a_snapshot() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("edited.sql");
+        fs::write(&file, "original\n").unwrap();
+        let (id, _) = workspace.open_path(&file).unwrap();
+
+        workspace
+            .update_text(&id, "edited but not saved\n")
+            .unwrap();
+
+        assert!(workspace
+            .store()
+            .buffers_dir()
+            .join(format!("{id}.txt"))
+            .exists());
+        assert_eq!(workspace.text(&id).unwrap(), "edited but not saved\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "original\n",
+            "the file itself is untouched until Save"
+        );
+    }
+
+    #[test]
+    fn unsaved_edits_to_a_file_survive_a_restart() {
+        // The case the no-snapshot optimisation must not break: edits that
+        // were never saved still have to come back.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wip.sql");
+        fs::write(&file, "original\n").unwrap();
+        let id;
+        {
+            let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
+            let (opened, _) = workspace.open_path(&file).unwrap();
+            id = opened;
+            workspace.update_text(&id, "half-finished edit\n").unwrap();
+        }
+        let (restored, _) = Workspace::open(dir.path()).unwrap();
+        assert_eq!(restored.text(&id).unwrap(), "half-finished edit\n");
+        assert!(restored.session().buffer(&id).unwrap().dirty);
+    }
+
+    #[test]
+    fn a_clean_file_tab_shows_what_is_on_disk_now_after_a_restart() {
+        // The flip side: an unedited tab re-reads the file, so a change made
+        // elsewhere is visible rather than a stale copy being shown.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("changes.sql");
+        fs::write(&file, "before\n").unwrap();
+        let id;
+        {
+            let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
+            let (opened, _) = workspace.open_path(&file).unwrap();
+            id = opened;
+        }
+        fs::write(&file, "changed by something else\n").unwrap();
+
+        let (restored, _) = Workspace::open(dir.path()).unwrap();
+        assert_eq!(restored.text(&id).unwrap(), "changed by something else\n");
+    }
+
+    #[test]
+    fn saving_a_clean_file_tab_does_not_blank_it() {
+        // With no snapshot to read, a careless save path would write "".
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("intact.sql");
+        fs::write(&file, "important contents\n").unwrap();
+        let (id, _) = workspace.open_path(&file).unwrap();
+
+        workspace.save(&id, None).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "important contents\n");
+    }
+
+    #[test]
+    fn the_open_limit_comes_from_the_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path()).unwrap();
+        {
+            let store = Store::new(dir.path()).unwrap();
+            fs::write(
+                store.root().join("settings.json"),
+                r#"{"max_open_bytes": 2097152}"#,
+            )
+            .unwrap();
+        }
+        let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
+        assert_eq!(workspace.settings().max_open_bytes, 2 * 1024 * 1024);
+
+        let too_big = dir.path().join("over.bin");
+        let file = fs::File::create(&too_big).unwrap();
+        file.set_len(3 * 1024 * 1024).unwrap();
+        drop(file);
+        let error = workspace.open_path(&too_big).unwrap_err().to_string();
+        assert!(error.contains("limit"), "got: {error}");
+
+        let fine = dir.path().join("under.bin");
+        let file = fs::File::create(&fine).unwrap();
+        file.set_len(1024 * 1024).unwrap();
+        drop(file);
+        assert!(workspace.open_path(&fine).is_ok());
     }
 
     #[test]

@@ -21,6 +21,11 @@ use tauri::{Emitter, Manager, State};
 /// reloads the session when it hears this.
 const SESSION_CHANGED: &str = "bhnotepad://session-changed";
 
+/// Emitted when a file handed to the app from outside could not be opened.
+/// Without this, double-clicking a file that is refused does nothing at all
+/// and says nothing — the window does not even come forward.
+const OPEN_FAILED: &str = "bhnotepad://open-failed";
+
 /// Files that arrived before the workspace existed. See `open_files`.
 static PENDING_FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
@@ -198,6 +203,27 @@ fn flush(state: State<'_, AppState>) -> CommandResult<()> {
 	workspace.persist().map_err(to_message)
 }
 
+/// The size limit and where to change it, for the status bar's message.
+#[derive(Serialize)]
+struct Limits {
+	max_open_bytes: u64,
+	settings_path: String,
+}
+
+#[tauri::command]
+fn limits(state: State<'_, AppState>) -> CommandResult<Limits> {
+	let workspace = state.workspace.lock().map_err(to_message)?;
+	Ok(Limits {
+		max_open_bytes: workspace.settings().max_open_bytes,
+		settings_path: workspace
+			.store()
+			.root()
+			.join("settings.json")
+			.to_string_lossy()
+			.into_owned(),
+	})
+}
+
 /// The language id for a name or path, so Save As can relabel a tab without
 /// the UI carrying a second copy of the extension table.
 #[tauri::command]
@@ -230,18 +256,28 @@ fn open_files(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
 	};
 
 	let mut opened = 0;
+	let mut failures: Vec<String> = Vec::new();
 	for path in paths {
 		match workspace.open_path(&path) {
 			Ok(_) => opened += 1,
-			Err(error) => eprintln!("BHNotepad: could not open {}: {error}", path.display()),
+			Err(error) => {
+				eprintln!("BHNotepad: could not open {}: {error}", path.display());
+				failures.push(error.to_string());
+			}
 		}
 	}
 	drop(workspace);
 
 	if opened > 0 {
 		let _ = app.emit(SESSION_CHANGED, ());
-		// Bring the window forward: the user just asked for a file, so they
-		// expect to be looking at it.
+	}
+	if let Some(message) = failures.first() {
+		let _ = app.emit(OPEN_FAILED, message.clone());
+	}
+
+	// Come forward for a failure as much as for a success: the user asked for
+	// a file, and silence looks exactly like the app being broken.
+	if opened > 0 || !failures.is_empty() {
 		if let Some(window) = app.get_webview_window("main") {
 			let _ = window.show();
 			let _ = window.set_focus();
@@ -357,6 +393,7 @@ pub fn run() {
 			set_language,
 			flush,
 			detect_language,
+			limits,
 		])
 		.build(tauri::generate_context!())
 		.expect("BHNotepad failed to start")

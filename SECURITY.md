@@ -47,7 +47,8 @@ Nothing leaves your machine.
   test.
 - A corrupt `session.json` is set aside rather than trusted or silently overwritten, and the app
   still starts.
-- Opening a file checks it is a regular file and at most 64 MB first, so a double-clicked
+- Opening a file checks it is a regular file and within the configured size limit (512 MB by
+  default, `max_open_bytes` in `settings.json`) first, so a double-clicked
   multi-gigabyte log — or a character device such as `/dev/zero` — cannot exhaust memory or hang
   the app. File associations make that an attacker-reachable path, which is why it is checked.
 - Saving creates its temporary file with the destination's permissions from the outset, so a

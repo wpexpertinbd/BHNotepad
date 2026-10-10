@@ -341,3 +341,48 @@ late-autosave resurrection already fixed in round one, tab-switch cancelling edi
 invalid UTF-8 panicking Rust, store symlinks, shell injection via tag names, fork PRs getting the
 write token). ⚠️ Codex also **stalled on first dispatch**, replying "I'll wait. Say go" and doing
 nothing — if a review comes back empty, check for that before believing there were no findings.
+
+---
+
+## 📏 File size limits — MEASURED, 2026-10-10 (do not change these by guesswork)
+
+Benjamin pushed back on the 64 MB cap: *"sometimes I need to open 1/2GB or bigger database …
+I never faced any opening issue with notepad++ regarding my file size at all, in my whole life!"*
+He was right that 64 MB was far too low. So the ceiling was **measured on his machine**
+(24 GB, Apple silicon, SSD at ~4.9 GB/s) rather than argued about:
+
+| size | load | memory | verdict |
+|---|---|---|---|
+| 64 MB | ~1 s | 369 MB | fully editable |
+| 128 MB | ~1 s | 627 MB | fully editable |
+| 256 MB | ~6 s | 539 MB | fully editable |
+| **512 MB** | **~7 s** | **717 MB settled** | **fully editable — the default limit** |
+| 768 MB | displays | 2.4 GB peak | **cannot save**: `update_text` dies with *Out of memory* |
+| 1 GB | never arrives | 2.1 GB peak | tab stuck — the string never reaches the editor |
+
+⚠️ **The wall is the IPC boundary, not the disk.** A full 512 MB snapshot write takes 0.10 s on
+this SSD — storage is irrelevant. What fails is handing the document to the webview as one
+JavaScript string. That is a consequence of choosing Tauri + CodeMirror over Scintilla for the
+3-platform win, and no amount of tuning moves it; only a chunked/virtual document model would.
+
+**What was changed as a result:**
+1. **`max_open_bytes` is a SETTING**, not a constant — `<configDir>/settings.json`, default
+   512 MB, floor 1 MB so a typo cannot make the editor useless. Being a setting also means the
+   ceiling can be re-measured without rebuilding, which is how the 768 MB and 1 GB numbers above
+   were obtained.
+2. **An opened file is no longer copied into the store.** It used to write a second 512 MB
+   snapshot for a file the user had not even edited. Now only scratch tabs and *edited*
+   file-backed tabs have snapshots; a clean file-backed tab is re-read from the file itself.
+   ⚠️ This has a deliberate side effect worth knowing: a clean tab shows what is on disk **now**
+   after a restart, so a change made by another program is visible rather than a stale copy.
+   ⚠️ And it broke `save()`, which read the snapshot and would therefore have written an EMPTY
+   file over the user's data — caught by `saving_a_clean_file_tab_does_not_blank_it`, which was
+   written before the bug was known. Both `save()` and `text()` now go through `contents()`.
+3. **Failures are visible.** A file that is refused used to do *nothing at all* — no tab, no
+   message, the window did not even come forward. There is now an `open-failed` event that puts
+   the reason in the status bar and raises the window. And `bufferText` has a 60 s timeout, so a
+   document that cannot cross the boundary shows an error instead of "Loading…" forever.
+
+**If this is revisited:** 512 MB is the largest size *verified to work*, not a cautious guess.
+Do not raise the default without re-running the measurement, and do not lower it without a
+reason — he has a real use case at this size.
