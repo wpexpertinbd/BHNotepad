@@ -484,3 +484,32 @@ network behaviour ever changes again, those two files change in the same commit.
 Verified against the real release: running 0.3.0 reports "already the latest version"; pretending
 to be 0.0.1 finds v0.3.0 and picks `BHNotepad_0.3.0_aarch64.dmg` — the right architecture, not
 whichever asset sorted first. 112 tests.
+
+### v0.4.1 — the updater actually installs
+
+Benjamin: *"why we stop only after downloading the file in downloads folder?"* and then
+*"check how we did for BHServe or BHUninstaller they are already working fine!"* — he was right
+again. **BHUninstaller does not stop at downloading.** The first read of `selfupdate.rs` ended at
+its `download()`, whose doc comment says "Nothing is executed", and that was taken as the whole
+story. The installer launcher is in the SHELL, not the core:
+`BHUninstaller/app/src-tauri/src/lib.rs::install_update`. ⚠️ A doc comment describes its own
+function, not the feature.
+
+Ported faithfully, including both guards:
+- **Download goes to a private scratch folder**, not Downloads — unpredictable name,
+  `create_dir` refuses a path that exists at all (symlink included), result verified to be the
+  directory just created. An installer the user will approve must not be something another
+  program could have staged.
+- **`install_update` runs exactly the file that was downloaded**, compared by full path against a
+  `DOWNLOADED` static — *not* "a file in the expected folder", which would accept anything
+  dropped there. Plus an extension check, so it cannot be turned into "run this program".
+- Launches `/usr/bin/open` (macOS), `msiexec /i` for `.msi` or the file itself (Windows),
+  `xdg-open` (Linux), then exits after 1.5 s so the installer can replace the app. Quitting is
+  safe with no prompt because every tab is already on disk — which is the whole point of the app.
+
+⚠️ **Not signed, and SECURITY.md says so.** There is no signature to verify, so integrity rests on
+HTTPS to github.com plus the exact-host allowlist. If releases are ever signed, verifying before
+running the installer is the right next step.
+
+Also fixed: **Help was sitting before View in the menu bar.** Help goes last, as it does in every
+other application. Spotted in a screenshot, not by a test.

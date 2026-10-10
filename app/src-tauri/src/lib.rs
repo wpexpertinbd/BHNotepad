@@ -340,19 +340,80 @@ fn set_auto_update(state: State<'_, AppState>, enabled: bool) -> CommandResult<(
 		.map_err(to_message)
 }
 
-/// Downloads a release's installer and shows it in the file manager.
+/// Downloads a release's installer and returns where it landed.
 ///
-/// Nothing is run. On macOS the user has to go through Open Anyway for an
-/// unsigned build in any case, so installing is their step by necessity as
-/// well as by choice.
+/// Into a private scratch folder rather than Downloads: this is a file the
+/// user will be asked to approve, so nothing must be able to prepare the path
+/// in advance. `install_update` then runs exactly this file and no other.
 #[tauri::command]
 fn download_update(release: bhn_core::update::Release) -> CommandResult<String> {
-	let into = dirs::download_dir().unwrap_or_else(|| {
-		dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Downloads")
-	});
-	let saved = bhn_core::update::download(&release, into)?;
-	let _ = tauri_plugin_opener::reveal_item_in_dir(&saved);
+	let saved = bhn_core::update::download(&release)?;
 	Ok(saved.to_string_lossy().into_owned())
+}
+
+/// Runs a downloaded installer and quits so it can replace this app.
+///
+/// Mirrors BHUninstaller's `install_update`, including both of its guards: the
+/// path must be *exactly* the file this process downloaded — not merely
+/// something sitting in the folder it downloaded into — and it must look like
+/// an installer rather than an arbitrary program.
+#[tauri::command]
+fn install_update(app: tauri::AppHandle, path: String) -> CommandResult<()> {
+	let path = PathBuf::from(&path);
+	if bhn_core::update::last_download().as_deref() != Some(path.as_path()) {
+		return Err("that file was not downloaded by this app — refusing to run it".into());
+	}
+	let ext = path
+		.extension()
+		.and_then(|e| e.to_str())
+		.map(|e| e.to_lowercase())
+		.unwrap_or_default();
+	if !matches!(ext.as_str(), "dmg" | "pkg" | "msi" | "exe" | "deb" | "rpm") {
+		return Err(format!("{ext} is not an installer — refusing to run it"));
+	}
+	if !path.is_file() {
+		return Err("the download is no longer there".into());
+	}
+
+	installer_command(&path, &ext)
+		.spawn()
+		.map_err(|error| format!("could not start the installer: {error}"))?;
+
+	// Give it a moment to appear before this window disappears, so the user is
+	// not left looking at nothing.
+	let handle = app.clone();
+	std::thread::spawn(move || {
+		std::thread::sleep(std::time::Duration::from_millis(1500));
+		handle.exit(0);
+	});
+	Ok(())
+}
+
+fn installer_command(path: &std::path::Path, ext: &str) -> std::process::Command {
+	#[cfg(target_os = "windows")]
+	{
+		// An .msi is data, not a program: it needs msiexec to run it.
+		if ext == "msi" {
+			let mut command = std::process::Command::new("msiexec");
+			command.arg("/i").arg(path);
+			return command;
+		}
+		std::process::Command::new(path)
+	}
+	#[cfg(target_os = "macos")]
+	{
+		let _ = ext;
+		let mut command = std::process::Command::new("/usr/bin/open");
+		command.arg(path);
+		command
+	}
+	#[cfg(target_os = "linux")]
+	{
+		let _ = ext;
+		let mut command = std::process::Command::new("xdg-open");
+		command.arg(path);
+		command
+	}
 }
 
 /// Opens a release page in the user's browser.
@@ -575,6 +636,7 @@ pub fn run() {
 			check_update,
 			set_auto_update,
 			download_update,
+			install_update,
 			open_release_page,
 		])
 		.build(tauri::generate_context!())

@@ -26,11 +26,23 @@ Nothing about you or your notes leaves your machine.
   BHNotepad makes no network request of any kind.
 - **No telemetry, no analytics, no crash reporting, ever** — those are not off by default, they
   do not exist.
-- **Updates are never installed behind your back.** The installer is downloaded to your Downloads
-  folder and shown in your file manager; opening it is your decision. A download URL is accepted
-  only if its host is exactly `github.com` or `objects.githubusercontent.com`, so a tampered API
-  answer cannot point the download elsewhere. This is an exact match, not a prefix — there is a
-  test for `github.com.evil.example.com`.
+- **Updates are never installed behind your back.** Nothing is downloaded until you press
+  Download, and nothing is run until you press Install. Pressing Install starts the platform's own
+  installer — the disk image on macOS, the `.msi` on Windows — and quits BHNotepad so it can be
+  replaced. You still approve the install itself.
+- **The download is guarded three ways:**
+  - A download URL is accepted only if its host is exactly `github.com` or
+    `objects.githubusercontent.com`. An exact match, not a prefix — there is a test for
+    `github.com.evil.example.com`, and it fails if the check is ever weakened.
+  - It is written into a scratch folder with an unpredictable name that this process creates
+    itself, refusing the path if anything already exists there, symlink included. An installer
+    you are about to approve must not be something another program could have prepared.
+  - Install runs **exactly** the file that was downloaded — compared by full path, not "a file in
+    that folder" — and only if it looks like an installer.
+- ⚠️ **What is not checked: a signature.** The builds are not code-signed, so there is no
+  signature to verify. The download's integrity rests on HTTPS to github.com and the host
+  allowlist above. If the releases were ever signed, verifying that before running the installer
+  would be the right next step.
 - **Your notes stay in your user folder** — `~/Library/Application Support/BHNotepad` on macOS,
   `%APPDATA%\BHNotepad` on Windows, `${XDG_CONFIG_HOME:-~/.config}/BHNotepad` on Linux — in plain
   text, readable by you and by anything else running as you.

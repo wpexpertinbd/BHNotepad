@@ -115,6 +115,9 @@ export const setAutoUpdate = (enabled: boolean) =>
   invoke<void>("set_auto_update", { enabled });
 export const downloadUpdate = (release: UpdateRelease) =>
   invoke<string>("download_update", { release });
+/** Runs the downloaded installer and quits. Only accepts the exact path
+ *  `downloadUpdate` returned. */
+export const installUpdate = (path: string) => invoke<void>("install_update", { path });
 export const openReleasePage = (url: string) =>
   invoke<void>("open_release_page", { url });
 export const limits = () => invoke<Limits>("limits");

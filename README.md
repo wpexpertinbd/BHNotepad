@@ -69,8 +69,10 @@ and checks all six tabs and their text came back.
   does not show up as a diff touching every line.
 - **Update checking** — on launch (at most once a day), or on demand from the Help menu. It asks
   GitHub's releases API for the newest tag and nothing else: no identifier, no usage data, no
-  telemetry. **Help → Check Automatically on Launch** turns it off, and with it off the app makes
-  no network request of any kind.
+  telemetry. When there is a new version, a strip offers **Download** and then **Install and
+  Quit**, which starts the installer for your platform and steps out of its way. Nothing is
+  downloaded or run until you press the button. **Help → Check Automatically on Launch** turns the
+  whole thing off, and with it off the app makes no network request of any kind.
 - **A menu bar** — File, Edit, Search, View — with the operations a Notepad++ user reaches for:
   Open Recent, Reload from Disk, Rename, Save a Copy As, Show in Finder/Explorer, Move to Trash,
   Close All but This / to the Left / to the Right, and the line operations (duplicate, delete,

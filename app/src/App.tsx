@@ -920,32 +920,6 @@ export function App() {
       ],
     },
     {
-      label: "Help",
-      items: [
-        { label: version ? `BHNotepad ${version}` : "BHNotepad", enabled: false },
-        {
-          label: "Check for Updates…",
-          separated: true,
-          run: () => void handleCheckUpdate(),
-        },
-        {
-          label: autoUpdate
-            ? "Check Automatically on Launch ✓"
-            : "Check Automatically on Launch",
-          run: () => void handleToggleAutoUpdate(),
-        },
-        {
-          label: "Releases & Source on GitHub",
-          separated: true,
-          run: () => {
-            void ipc
-              .openReleasePage("https://github.com/wpexpertinbd/BHNotepad/releases/latest")
-              .catch((error) => fail("Could not open the page", error));
-          },
-        },
-      ],
-    },
-    {
       label: "View",
       items: [
         { label: "Zoom In", shortcut: `${ACCEL}+`, run: () => cmd.zoomIn() },
@@ -969,6 +943,32 @@ export function App() {
                 note("Closed-tab history cleared");
               })
               .catch((error) => fail("Could not clear the history", error));
+          },
+        },
+      ],
+    },
+    {
+      label: "Help",
+      items: [
+        { label: version ? `BHNotepad ${version}` : "BHNotepad", enabled: false },
+        {
+          label: "Check for Updates…",
+          separated: true,
+          run: () => void handleCheckUpdate(),
+        },
+        {
+          label: autoUpdate
+            ? "Check Automatically on Launch ✓"
+            : "Check Automatically on Launch",
+          run: () => void handleToggleAutoUpdate(),
+        },
+        {
+          label: "Releases & Source on GitHub",
+          separated: true,
+          run: () => {
+            void ipc
+              .openReleasePage("https://github.com/wpexpertinbd/BHNotepad/releases/latest")
+              .catch((error) => fail("Could not open the page", error));
           },
         },
       ],

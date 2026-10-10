@@ -343,58 +343,118 @@ mod remote {
         }
     }
 
-    /// Downloads a release's installer and returns where it landed.
+    /// A scratch directory only this process could have created.
     ///
-    /// Nothing is executed. The file is handed to the user's file manager,
-    /// which is where the decision to install belongs — especially here, where
-    /// macOS needs its own Open Anyway step anyway.
-    pub fn download(release: &Release, into: PathBuf) -> Result<PathBuf, String> {
+    /// The download is an installer the user will be asked to approve, so it
+    /// must not be possible for anything to have prepared the path in advance
+    /// — as a directory to write into later, or as a symlink pointing
+    /// somewhere else. The name is unpredictable and `create_dir` refuses a
+    /// path that exists at all, symlink included, rather than following it.
+    fn private_temp_dir(prefix: &str) -> Result<PathBuf, String> {
+        let base = std::env::temp_dir();
+        let mut last = String::new();
+        for attempt in 0..8u32 {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            let dir = base.join(format!(
+                "{prefix}-{}-{:08x}{:x}",
+                std::process::id(),
+                nanos,
+                attempt
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => {
+                    let meta = std::fs::symlink_metadata(&dir)
+                        .map_err(|e| format!("could not verify {}: {e}", dir.display()))?;
+                    if meta.is_symlink() || !meta.is_dir() {
+                        return Err("the scratch folder was not what we created — refusing".into());
+                    }
+                    return Ok(dir);
+                }
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(format!("could not create a scratch folder: {last}"))
+    }
+
+    /// The file this process last downloaded.
+    ///
+    /// Whatever launches the installer has to be certain it is running *the
+    /// download* and not a path someone else chose. Comparing against this is
+    /// exact; deriving the expected directory instead would accept any file
+    /// that happened to be sitting in it.
+    static DOWNLOADED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+    pub fn last_download() -> Option<PathBuf> {
+        DOWNLOADED.lock().ok().and_then(|l| l.clone())
+    }
+
+    /// Downloads a release's installer and returns where it landed.
+    pub fn download(release: &Release) -> Result<PathBuf, String> {
         let url = release
             .asset_url
             .as_ref()
             .ok_or("this release has no download for this platform")?;
         if !host_allowed(url) {
-            return Err("that download link is not on github.com".into());
+            return Err("that download is not hosted on GitHub — refusing it".into());
         }
-        let name = release
-            .asset_name
-            .as_deref()
-            .unwrap_or("BHNotepad-update")
-            // The name comes from the API; never let it walk out of the folder.
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or("BHNotepad-update");
+        let name = release.asset_name.as_deref().unwrap_or("BHNotepad-update");
 
         let mut response = agent()
             .get(url)
             .call()
-            .map_err(|error| format!("could not download it: {error}"))?;
+            .map_err(|error| format!("download failed: {error}"))?;
         if response.status() != 200 {
-            return Err(format!(
-                "GitHub answered {} for the download",
-                response.status()
-            ));
+            return Err(format!("download failed: GitHub answered {}", response.status()));
         }
 
-        // Generous, but bounded: these installers are two or three megabytes.
+        // Far larger than any build of this app; the cap only stops an
+        // unexpected response filling the disk.
         let bytes = response
             .body_mut()
             .with_config()
-            .limit(256 * 1024 * 1024)
+            .limit(250 * 1024 * 1024)
             .read_to_vec()
-            .map_err(|error| format!("could not download it: {error}"))?;
+            .map_err(|error| format!("download failed: {error}"))?;
 
-        std::fs::create_dir_all(&into)
-            .map_err(|error| format!("could not use {}: {error}", into.display()))?;
-        let target = into.join(name);
-        std::fs::write(&target, &bytes)
-            .map_err(|error| format!("could not save {}: {error}", target.display()))?;
-        Ok(target)
+        let dir = private_temp_dir("BHNotepad-update")?;
+        // The name comes from GitHub, so it is not trusted as a path.
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = dir.join(safe);
+        // `create_new` refuses an existing file — a symlink included — rather
+        // than writing through it.
+        let _ = std::fs::remove_file(&path);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| format!("could not save the download: {error}"))?;
+        std::io::Write::write_all(&mut file, &bytes)
+            .map_err(|error| format!("could not save the download: {error}"))?;
+
+        if let Ok(mut last) = DOWNLOADED.lock() {
+            *last = Some(path.clone());
+        }
+        Ok(path)
     }
 }
 
 #[cfg(feature = "updates")]
-pub use remote::{check, check_due, download, now_secs, CheckResult, Release, CHECK_INTERVAL_SECS};
+pub use remote::{
+    check, check_due, download, last_download, now_secs, CheckResult, Release,
+    CHECK_INTERVAL_SECS,
+};
 
 #[cfg(all(test, feature = "updates"))]
 mod remote_tests {
