@@ -21,6 +21,27 @@ pub use store::{new_id, Store, StoreError};
 use std::fs;
 use std::path::Path;
 
+/// Largest file that may be opened into a tab.
+///
+/// Not a performance promise — a safety ceiling. The text is held in memory,
+/// copied across to the editor, and snapshotted on every autosave, so an
+/// unbounded read is a way to wedge the app rather than a feature. Generous
+/// enough for any log or source file someone would genuinely want to edit.
+pub const MAX_OPEN_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Formats a byte count for an error the user will actually read.
+fn human_bytes(bytes: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    const KB: u64 = 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
 /// A session plus the store it is persisted to.
 ///
 /// The shell drives this: every editor action becomes one call, and the
@@ -119,6 +140,32 @@ impl Workspace {
             return Ok((id, text));
         }
 
+        // Check what this is before reading it. Now that files can be opened
+        // by double-clicking, `fs::read` on its own would happily try to pull
+        // a 5 GB log — or a character device like /dev/zero, which never
+        // ends — into memory and then across to the editor.
+        let meta = fs::metadata(path_ref).map_err(|source| StoreError::Io {
+            context: format!("opening {}", path_ref.display()),
+            source,
+        })?;
+        if !meta.is_file() {
+            return Err(StoreError::Io {
+                context: format!("{} is not a regular file", path_ref.display()),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+            });
+        }
+        if meta.len() > MAX_OPEN_BYTES {
+            return Err(StoreError::Io {
+                context: format!(
+                    "{} is {} and the limit is {}",
+                    path_ref.display(),
+                    human_bytes(meta.len()),
+                    human_bytes(MAX_OPEN_BYTES)
+                ),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "file too large"),
+            });
+        }
+
         let bytes = fs::read(path_ref).map_err(|source| StoreError::Io {
             context: format!("opening {}", path_ref.display()),
             source,
@@ -140,6 +187,14 @@ impl Workspace {
     /// This is the write-through that makes quitting safe, so the shell must
     /// call it as the user types (debounced), not at close time.
     pub fn update_text(&mut self, id: &str, text: &str) -> Result<(), StoreError> {
+        // Ignore a tab that is no longer open. The UI debounces this call, so
+        // a keystroke a moment before a tab is closed arrives a moment after —
+        // and writing then would put the text of a closed tab back on disk,
+        // where it would sit until the next launch pruned it. Someone who
+        // closes a tab to be rid of what is in it should be rid of it.
+        if self.session.buffer(id).is_none() {
+            return Ok(());
+        }
         self.store.write_buffer(id, text)?;
 
         let mut became_dirty = false;
@@ -235,6 +290,43 @@ impl Workspace {
         Ok(target)
     }
 
+    /// Closes every tab, leaving one empty scratch tab behind.
+    ///
+    /// Returns how many were closed. Unlike [`Workspace::close`], this is a
+    /// bulk destructive action: scratch text that was never saved to a file is
+    /// gone afterwards. The shell is expected to ask once before calling it —
+    /// that single confirmation is the exception to the app's no-prompt rule,
+    /// not a softening of it.
+    pub fn close_all(&mut self) -> Result<usize, StoreError> {
+        let ids: Vec<String> = self.session.buffers.iter().map(|b| b.id.clone()).collect();
+        let closed = ids.len();
+        for id in &ids {
+            self.store.delete_buffer(id)?;
+        }
+        self.session.buffers.clear();
+        self.session.active = 0;
+
+        if self.ensure_not_empty() {
+            let fresh = self.session.buffers[0].id.clone();
+            self.store.write_buffer(&fresh, "")?;
+        }
+        self.persist()?;
+        Ok(closed)
+    }
+
+    /// Every tab that has never been saved to a file, in tab order.
+    ///
+    /// Save All walks these one at a time asking where each should go; tabs
+    /// that already have a path are written without asking.
+    pub fn unsaved_tabs(&self) -> Vec<Buffer> {
+        self.session
+            .buffers
+            .iter()
+            .filter(|b| b.is_scratch())
+            .cloned()
+            .collect()
+    }
+
     /// Closes a tab and deletes its snapshot. Never prompts — that is the point
     /// of the app.
     ///
@@ -276,6 +368,16 @@ fn write_user_file(path: &Path, data: &[u8]) -> Result<(), StoreError> {
         file.sync_all()?;
         Ok(())
     })();
+
+    // A rename replaces the destination's permissions with the temporary
+    // file's. Without this, re-saving a file the user had deliberately made
+    // private (0600) would silently widen it to whatever the umask gives,
+    // which is usually world-readable.
+    if attempt.is_ok() {
+        if let Ok(existing) = fs::metadata(path) {
+            let _ = fs::set_permissions(&tmp, existing.permissions());
+        }
+    }
 
     if attempt.is_ok() && fs::rename(&tmp, path).is_ok() {
         return Ok(());
@@ -538,6 +640,115 @@ mod tests {
     }
 
     #[test]
+    fn close_all_clears_every_tab_and_leaves_one_empty_one() {
+        let (_dir, mut workspace) = workspace();
+        let first = workspace.session().buffers[0].id.clone();
+        workspace.update_text(&first, "one").unwrap();
+        let second = workspace.new_scratch().unwrap();
+        workspace.update_text(&second, "two").unwrap();
+        let third = workspace.new_scratch().unwrap();
+
+        let closed = workspace.close_all().unwrap();
+
+        assert_eq!(closed, 3);
+        assert_eq!(workspace.session().buffers.len(), 1);
+        assert_eq!(workspace.session().active, 0);
+        assert_eq!(workspace.session().buffers[0].title, "new 1");
+        assert!(!workspace.session().buffers[0].dirty);
+        for id in [&first, &second, &third] {
+            assert_eq!(
+                workspace.store().read_buffer(id).unwrap(),
+                "",
+                "every snapshot should be gone"
+            );
+        }
+    }
+
+    #[test]
+    fn close_all_survives_a_restart_as_a_single_empty_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
+            let id = workspace.session().buffers[0].id.clone();
+            workspace.update_text(&id, "will be discarded").unwrap();
+            workspace.new_scratch().unwrap();
+            workspace.close_all().unwrap();
+        }
+        let (restored, note) = Workspace::open(dir.path()).unwrap();
+        assert!(note.is_none());
+        assert_eq!(restored.session().buffers.len(), 1);
+        assert_eq!(
+            restored.text(&restored.session().buffers[0].id).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn unsaved_tabs_lists_only_the_scratch_ones_in_order() {
+        let (dir, mut workspace) = workspace();
+        let first = workspace.session().buffers[0].id.clone();
+        let file = dir.path().join("already.txt");
+        fs::write(&file, "on disk").unwrap();
+        workspace.open_path(&file).unwrap();
+        let third = workspace.new_scratch().unwrap();
+
+        let pending: Vec<String> = workspace.unsaved_tabs().into_iter().map(|b| b.id).collect();
+        assert_eq!(
+            pending,
+            vec![first, third],
+            "the opened file is not pending"
+        );
+    }
+
+    #[test]
+    fn a_tab_saved_to_a_file_drops_out_of_unsaved_tabs() {
+        let (dir, mut workspace) = workspace();
+        let id = workspace.session().buffers[0].id.clone();
+        workspace.update_text(&id, "content").unwrap();
+        assert_eq!(workspace.unsaved_tabs().len(), 1);
+
+        let target = dir.path().join("now_named.txt");
+        workspace
+            .save(&id, Some(&target.to_string_lossy()))
+            .unwrap();
+        assert!(workspace.unsaved_tabs().is_empty());
+    }
+
+    #[test]
+    fn a_late_autosave_cannot_put_a_closed_tabs_text_back_on_disk() {
+        // The UI debounces update_text, so a keystroke just before a close
+        // lands just after it. That must not resurrect the file.
+        let (_dir, mut workspace) = workspace();
+        let doomed = workspace.new_scratch().unwrap();
+        workspace
+            .update_text(&doomed, "a password, pasted for a second")
+            .unwrap();
+        workspace.close(&doomed).unwrap();
+
+        workspace
+            .update_text(&doomed, "a password, pasted for a second")
+            .unwrap();
+
+        assert_eq!(
+            workspace.store().read_buffer(&doomed).unwrap(),
+            "",
+            "the closed tab's text must stay gone"
+        );
+        assert!(workspace.session().buffer(&doomed).is_none());
+    }
+
+    #[test]
+    fn a_late_autosave_after_close_all_writes_nothing() {
+        let (_dir, mut workspace) = workspace();
+        let first = workspace.session().buffers[0].id.clone();
+        workspace.update_text(&first, "secret").unwrap();
+        workspace.close_all().unwrap();
+
+        workspace.update_text(&first, "secret").unwrap();
+        assert_eq!(workspace.store().read_buffer(&first).unwrap(), "");
+    }
+
+    #[test]
     fn closing_an_unknown_id_is_harmless() {
         let (_dir, mut workspace) = workspace();
         workspace.close("nosuchtab").unwrap();
@@ -617,6 +828,108 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(text, "body");
         assert_eq!(workspace.session().buffers.len(), count, "no duplicate tab");
+    }
+
+    #[test]
+    fn refuses_a_file_larger_than_the_cap_without_reading_it() {
+        let (dir, mut workspace) = workspace();
+        let huge = dir.path().join("enormous.log");
+        // Sparse: set_len does not actually write 65 MB to the disk.
+        let file = fs::File::create(&huge).unwrap();
+        file.set_len(MAX_OPEN_BYTES + 1).unwrap();
+        drop(file);
+
+        let before = workspace.session().clone();
+        let error = workspace.open_path(&huge).unwrap_err().to_string();
+        assert!(
+            error.contains("limit"),
+            "the message should say why: {error}"
+        );
+        assert_eq!(
+            &before,
+            workspace.session(),
+            "nothing should have been opened"
+        );
+    }
+
+    #[test]
+    fn a_file_right_at_the_cap_is_still_allowed() {
+        let (dir, mut workspace) = workspace();
+        let big = dir.path().join("just_fits.log");
+        let file = fs::File::create(&big).unwrap();
+        file.set_len(MAX_OPEN_BYTES).unwrap();
+        drop(file);
+        assert!(
+            workspace.open_path(&big).is_ok(),
+            "the cap must be inclusive"
+        );
+    }
+
+    #[test]
+    fn refuses_anything_that_is_not_a_regular_file() {
+        // A directory stands in for the real hazard: a character device such
+        // as /dev/zero, which fs::read would never finish reading.
+        let (dir, mut workspace) = workspace();
+        let folder = dir.path().join("a_directory");
+        fs::create_dir(&folder).unwrap();
+        let error = workspace.open_path(&folder).unwrap_err().to_string();
+        assert!(error.contains("not a regular file"), "got: {error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_store_is_readable_only_by_this_user() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
+        let id = workspace.session().buffers[0].id.clone();
+        workspace
+            .update_text(&id, "a token someone pasted here")
+            .unwrap();
+        workspace.persist().unwrap();
+
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(dir.path()), 0o700, "store directory");
+        assert_eq!(
+            mode(&workspace.store().buffers_dir()),
+            0o700,
+            "buffers directory"
+        );
+        assert_eq!(
+            mode(&workspace.store().session_path()),
+            0o600,
+            "session.json"
+        );
+        assert_eq!(
+            mode(&workspace.store().buffers_dir().join(format!("{id}.txt"))),
+            0o600,
+            "the scratch note itself"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_does_not_widen_the_permissions_of_an_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, mut workspace) = workspace();
+        let secret = dir.path().join("private.txt");
+        fs::write(&secret, "first").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let id = workspace.session().buffers[0].id.clone();
+        workspace.update_text(&id, "second").unwrap();
+        workspace
+            .save(&id, Some(&secret.to_string_lossy()))
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "second");
+        assert_eq!(
+            fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a deliberately private file must not become world-readable on save"
+        );
     }
 
     #[test]

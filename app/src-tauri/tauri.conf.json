@@ -39,6 +39,26 @@
     "longDescription": "BHNotepad keeps every tab exactly where you left it. Close a tab or quit the app with unsaved scratch notes and it never asks you to save or discard — the text is already on disk, and all of your tabs come back next time. Syntax highlighting, regex find and replace, and no telemetry.",
     "copyright": "Copyright (c) 2026 Benjamin Biswas (BiswasHost)",
     "licenseFile": "../../LICENSE",
+    "fileAssociations": [
+      {
+        "ext": [
+          "txt", "text", "log", "md", "markdown", "nfo",
+          "json", "jsonc", "yaml", "yml", "toml", "ini", "cfg", "conf", "properties", "env",
+          "csv", "tsv", "xml", "svg", "plist",
+          "html", "htm", "css", "scss", "sass", "less",
+          "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx",
+          "py", "rb", "pl", "pm", "php", "lua", "tcl", "r",
+          "c", "h", "cpp", "cxx", "cc", "hpp", "hxx", "rs", "go", "swift",
+          "java", "kt", "cs", "vb",
+          "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
+          "sql", "diff", "patch", "gradle", "cmake", "dockerfile"
+        ],
+        "name": "Text Document",
+        "description": "Plain text and source files",
+        "mimeType": "text/plain",
+        "role": "Editor"
+      }
+    ],
     "macOS": {
       "minimumSystemVersion": "11.0"
     },

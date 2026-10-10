@@ -27,3 +27,9 @@ tauri-plugin-dialog = "2"
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
+
+# Only Windows and Linux spawn a second process for a double-clicked file, and
+# two processes sharing one session store could lose tabs. macOS keeps a single
+# instance by itself, so it does not pay for this.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"

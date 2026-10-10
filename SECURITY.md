@@ -21,9 +21,13 @@ Nothing leaves your machine.
   `%APPDATA%\BHNotepad` on Windows, `${XDG_CONFIG_HOME:-~/.config}/BHNotepad` on Linux — in plain
   text, readable by you and by anything else running as you.
 - **Scratch notes are NOT encrypted.** They are ordinary files, exactly like the ones you would
-  save yourself. Do not keep passwords, keys or other secrets in them.
+  save yourself. Do not keep passwords, keys or other secrets in them. On macOS and Linux the
+  store directory is created `0700` and every file in it `0600`, so other accounts on the same
+  machine cannot read them; on Windows `%APPDATA%` is already restricted to your user. That
+  protects them from other local users, not from anything running as you.
 - **No file access beyond what you pick.** The app only reads or writes a file you choose in an
-  Open or Save dialog, plus its own store.
+  Open or Save dialog, one you hand it by double-clicking or dropping it on the icon, plus its
+  own store. It never opens anything on its own.
 
 ## How the app is locked down
 
@@ -36,6 +40,11 @@ Nothing leaves your machine.
   test.
 - A corrupt `session.json` is set aside rather than trusted or silently overwritten, and the app
   still starts.
+- Opening a file checks it is a regular file and at most 64 MB first, so a double-clicked
+  multi-gigabyte log — or a character device such as `/dev/zero` — cannot exhaust memory or hang
+  the app. File associations make that an attacker-reachable path, which is why it is checked.
+- Saving copies the destination file's existing permissions onto the temporary file before the
+  rename, so re-saving a file you had deliberately made private does not widen it.
 
 ## Supported versions
 

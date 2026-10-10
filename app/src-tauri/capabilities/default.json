@@ -2,12 +2,15 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "What the BHNotepad window is allowed to do. Kept to the minimum: the editor needs the Open and Save sheets and nothing else. No shell, no HTTP, no filesystem scope beyond what the user picks in a dialog.",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "dialog:allow-confirm"
   ]
 }

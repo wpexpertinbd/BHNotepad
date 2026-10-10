@@ -42,6 +42,8 @@ export const bufferText = (id: string) => invoke<string>("buffer_text", { id });
 export const newTab = () => invoke<Opened>("new_tab");
 export const openPath = (path: string) => invoke<Opened>("open_path", { path });
 export const closeTab = (id: string) => invoke<Session>("close_tab", { id });
+export const closeAll = () => invoke<Session>("close_all");
+export const unsavedTabs = () => invoke<Buffer[]>("unsaved_tabs");
 export const saveBuffer = (id: string, path?: string) =>
   invoke<Session>("save", { id, path: path ?? null });
 export const setActive = (index: number) => invoke<void>("set_active", { index });

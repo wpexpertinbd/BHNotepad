@@ -14,7 +14,15 @@ use std::sync::Mutex;
 
 use bhn_core::{Session, Workspace};
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
+
+/// Emitted after files are opened from outside the window — a double-click in
+/// Finder or Explorer, or a second launch handing its arguments over. The UI
+/// reloads the session when it hears this.
+const SESSION_CHANGED: &str = "bhnotepad://session-changed";
+
+/// Files that arrived before the workspace existed. See `open_files`.
+static PENDING_FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// Where the session store lives, per platform. This is the only place in the
 /// project that asks the OS about paths; the core takes it as an argument.
@@ -133,6 +141,23 @@ fn close_tab(state: State<'_, AppState>, id: String) -> CommandResult<Session> {
 	Ok(workspace.session().clone())
 }
 
+/// Closes every tab. The shell asks the user once before calling this; the
+/// core does not ask, and neither does anything else in the close path.
+#[tauri::command]
+fn close_all(state: State<'_, AppState>) -> CommandResult<Session> {
+	let mut workspace = state.workspace.lock().map_err(to_message)?;
+	workspace.close_all().map_err(to_message)?;
+	Ok(workspace.session().clone())
+}
+
+/// The tabs that have never been saved to a file, in tab order, so Save All
+/// can ask where each should go.
+#[tauri::command]
+fn unsaved_tabs(state: State<'_, AppState>) -> CommandResult<Vec<bhn_core::Buffer>> {
+	let workspace = state.workspace.lock().map_err(to_message)?;
+	Ok(workspace.unsaved_tabs())
+}
+
 #[tauri::command]
 fn set_active(state: State<'_, AppState>, index: usize) -> CommandResult<()> {
 	let mut workspace = state.workspace.lock().map_err(to_message)?;
@@ -180,6 +205,63 @@ fn detect_language(path: String) -> String {
 	bhn_core::detect_language(&path).to_string()
 }
 
+/// Opens files handed to the app from outside the window and tells the UI.
+///
+/// Used by three paths that all mean the same thing: command-line arguments at
+/// launch, a second launch whose arguments are forwarded here by the
+/// single-instance plugin, and macOS's "Opened" event when a document is
+/// dropped on the icon or double-clicked in Finder.
+///
+/// A file that cannot be read is reported and skipped rather than aborting the
+/// rest — opening four files and failing on one should still open three.
+fn open_files(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
+	let Some(state) = app.try_state::<AppState>() else {
+		// macOS can deliver a launch-time document before `setup` has managed
+		// the state. Dropping it here is how a cold-start double-click
+		// silently opened nothing, so hold it until the workspace exists and
+		// let `setup` drain the queue.
+		if let Ok(mut pending) = PENDING_FILES.lock() {
+			pending.extend(paths);
+		}
+		return;
+	};
+	let Ok(mut workspace) = state.workspace.lock() else {
+		return;
+	};
+
+	let mut opened = 0;
+	for path in paths {
+		match workspace.open_path(&path) {
+			Ok(_) => opened += 1,
+			Err(error) => eprintln!("BHNotepad: could not open {}: {error}", path.display()),
+		}
+	}
+	drop(workspace);
+
+	if opened > 0 {
+		let _ = app.emit(SESSION_CHANGED, ());
+		// Bring the window forward: the user just asked for a file, so they
+		// expect to be looking at it.
+		if let Some(window) = app.get_webview_window("main") {
+			let _ = window.show();
+			let _ = window.set_focus();
+		}
+	}
+}
+
+/// Picks the file paths out of a process argument list.
+///
+/// Skips the program name and anything that looks like a flag, so a stray
+/// `--flag` from a launcher is not treated as a file name.
+fn paths_from_args<I: IntoIterator<Item = String>>(args: I) -> Vec<PathBuf> {
+	args.into_iter()
+		.skip(1)
+		.filter(|arg| !arg.starts_with('-'))
+		.map(PathBuf::from)
+		.filter(|path| path.is_file())
+		.collect()
+}
+
 /// Best-effort flush at teardown.
 ///
 /// A belt-and-braces measure only: everything it writes is positional. If the
@@ -197,7 +279,19 @@ fn flush_quietly(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
-	tauri::Builder::default()
+	let builder = tauri::Builder::default();
+
+	// Windows and Linux start a whole new process when a file is
+	// double-clicked. Two processes sharing one session store would fight over
+	// session.json and could lose tabs, so a second launch hands its arguments
+	// to the running app and exits. macOS does not need this: Launch Services
+	// keeps one instance and delivers files through RunEvent::Opened below.
+	#[cfg(any(target_os = "windows", target_os = "linux"))]
+	let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+		open_files(app, paths_from_args(argv));
+	}));
+
+	builder
 		.plugin(tauri_plugin_dialog::init())
 		.setup(|app| {
 			let root = config_root();
@@ -210,6 +304,17 @@ pub fn run() {
 				workspace: Mutex::new(workspace),
 				restore_note: Mutex::new(note),
 			});
+
+			// Files named on the command line (how Windows and Linux deliver a
+			// double-clicked document to a cold start), plus anything macOS
+			// handed over before the workspace existed.
+			let mut paths = paths_from_args(std::env::args());
+			if let Ok(mut pending) = PENDING_FILES.lock() {
+				paths.append(&mut pending);
+			}
+			if !paths.is_empty() {
+				open_files(app.handle(), paths);
+			}
 			Ok(())
 		})
 		.on_window_event(|window, event| {
@@ -229,6 +334,8 @@ pub fn run() {
 			update_position,
 			save,
 			close_tab,
+			close_all,
+			unsaved_tabs,
 			set_active,
 			reorder,
 			set_word_wrap,
@@ -239,8 +346,21 @@ pub fn run() {
 		.build(tauri::generate_context!())
 		.expect("BHNotepad failed to start")
 		.run(|app, event| {
-			if let tauri::RunEvent::ExitRequested { .. } = event {
-				flush_quietly(app);
+			match event {
+				tauri::RunEvent::ExitRequested { .. } => flush_quietly(app),
+				// macOS delivers a double-clicked document here rather than on
+				// the command line, both at launch and while already running.
+				#[cfg(target_os = "macos")]
+				tauri::RunEvent::Opened { urls } => {
+					let paths: Vec<PathBuf> = urls
+						.iter()
+						.filter_map(|url| url.to_file_path().ok())
+						.collect();
+					if !paths.is_empty() {
+						open_files(app, paths);
+					}
+				}
+				_ => {}
 			}
 		});
 }

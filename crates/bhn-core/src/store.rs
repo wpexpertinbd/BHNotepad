@@ -74,6 +74,47 @@ fn base36(mut value: u64) -> String {
     String::from_utf8(out).expect("base36 alphabet is ASCII")
 }
 
+/// Creates a file only this user can read.
+///
+/// Scratch notes are whatever the user typed and never had to name — exactly
+/// the place a password or a token gets pasted "just for a second". The
+/// default umask would make them 0644 and readable by every other account on
+/// the machine, so the mode is set at creation rather than afterwards: a
+/// chmod after the write leaves a window in which the file is world-readable.
+///
+/// Windows has no mode bits; `%APPDATA%` is already restricted to the user by
+/// its ACL, so plain creation is correct there.
+fn create_private(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::File::create(path)
+    }
+}
+
+/// Restricts a directory to this user. Unix only; see `create_private`.
+fn make_private_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
 /// Writes `data` to `path` so that a reader sees either the old file or the
 /// new one, never a half-written one.
 fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
@@ -82,7 +123,7 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
 
     let tmp = parent.join(format!(".bhn-{}.tmp", new_id()));
     let write_result = (|| -> std::io::Result<()> {
-        let mut file = fs::File::create(&tmp)?;
+        let mut file = create_private(&tmp)?;
         file.write_all(data)?;
         // Without this the rename can land before the bytes do, so a power
         // loss leaves a correctly-named empty file -- worse than no file.
@@ -121,6 +162,10 @@ impl Store {
         let store = Self { root };
         fs::create_dir_all(store.buffers_dir())
             .map_err(io(format!("creating {}", store.buffers_dir().display())))?;
+        // Tighten both levels, including on a store created by an older build
+        // that left them world-readable.
+        let _ = make_private_dir(store.root());
+        let _ = make_private_dir(&store.buffers_dir());
         Ok(store)
     }
 

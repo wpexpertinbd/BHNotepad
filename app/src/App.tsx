@@ -6,13 +6,19 @@
 // closing a tab or quitting is never a question. See CLAUDE.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import {
+  open as openDialog,
+  save as saveDialog,
+  confirm as confirmDialog,
+} from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 
 import * as ipc from "./ipc";
 import type { Buffer, Session } from "./ipc";
 import { Editor } from "./Editor";
 import { TabBar } from "./TabBar";
+import { FileMenu } from "./FileMenu";
 import { FindDialog, type FindMode } from "./FindDialog";
 import { SELECTABLE, labelFor } from "./languages";
 import type { EditorView } from "@codemirror/view";
@@ -106,6 +112,26 @@ export function App() {
     if (active) void ensureText(active.id);
   }, [active, ensureText]);
 
+  // Files opened from outside the window — double-clicked in Finder or
+  // Explorer, dropped on the icon, or passed to a second launch that handed
+  // them to this one. The Rust side has already opened them; this just picks
+  // up the new session.
+  useEffect(() => {
+    const pending = listen("bhnotepad://session-changed", () => {
+      void (async () => {
+        try {
+          const restored = await ipc.sessionState();
+          setSession(restored.session);
+        } catch (error) {
+          fail("Could not open that file", error);
+        }
+      })();
+    });
+    return () => {
+      void pending.then((unlisten) => unlisten());
+    };
+  }, [fail]);
+
   // Keep the window title showing the active tab, as Notepad++ does.
   useEffect(() => {
     document.title = active ? `${active.title} — BHNotepad` : "BHNotepad";
@@ -178,6 +204,80 @@ export function App() {
     },
     [fail],
   );
+
+  /// Closes every tab after one confirmation.
+  ///
+  /// This is the only confirmation in the app, and it is here because the
+  /// action is bulk and irreversible: scratch text that was never saved to a
+  /// file is gone afterwards. Closing one tab, or quitting, still asks nothing.
+  const handleCloseAll = useCallback(async () => {
+    if (!session) return;
+    const count = session.buffers.length;
+    const unsaved = session.buffers.filter((b) => !b.path).length;
+
+    const detail =
+      unsaved > 0
+        ? `${unsaved === count ? "All " : ""}${unsaved} ${
+            unsaved === 1 ? "tab has" : "tabs have"
+          } never been saved to a file. Their text will be discarded.`
+        : "Every tab is saved to a file, so nothing will be lost.";
+
+    try {
+      const go = await confirmDialog(
+        `Close all ${count} ${count === 1 ? "tab" : "tabs"}?\n\n${detail}`,
+        { title: "Close All", kind: unsaved > 0 ? "warning" : "info", okLabel: "Close All" },
+      );
+      if (!go) return;
+
+      const updated = await ipc.closeAll();
+      setSession(updated);
+      setTexts({});
+      note(`Closed ${count} ${count === 1 ? "tab" : "tabs"}`);
+    } catch (error) {
+      fail("Could not close the tabs", error);
+    }
+  }, [session, fail, note]);
+
+  /// Saves every tab, asking where each unsaved one should go, one at a time.
+  ///
+  /// Cancelling a single tab's sheet skips that tab and moves to the next
+  /// rather than abandoning the whole run — having saved four of six should
+  /// not be undone by changing your mind about the fifth.
+  const handleSaveAll = useCallback(async () => {
+    if (!session) return;
+    try {
+      let saved = 0;
+      let skipped = 0;
+      let latest: Session | null = null;
+
+      for (const buffer of session.buffers) {
+        let target: string | undefined;
+        if (!buffer.path) {
+          const picked = await saveDialog({ defaultPath: buffer.title });
+          if (!picked) {
+            skipped += 1;
+            continue;
+          }
+          target = picked;
+        } else if (!buffer.dirty) {
+          continue;
+        }
+        latest = await ipc.saveBuffer(buffer.id, target);
+        saved += 1;
+      }
+
+      if (latest) setSession(latest);
+      note(
+        saved === 0
+          ? skipped > 0
+            ? "Nothing saved"
+            : "Everything was already saved"
+          : `Saved ${saved}${skipped > 0 ? `, skipped ${skipped}` : ""}`,
+      );
+    } catch (error) {
+      fail("Could not save everything", error);
+    }
+  }, [session, fail, note]);
 
   const handleSelect = useCallback(
     (index: number) => {
@@ -281,6 +381,8 @@ export function App() {
     toggleWrap,
     active,
     setFind,
+    handleCloseAll,
+    handleSaveAll,
   });
   actions.current = {
     handleNew,
@@ -291,6 +393,8 @@ export function App() {
     toggleWrap,
     active,
     setFind,
+    handleCloseAll,
+    handleSaveAll,
   };
 
   useEffect(() => {
@@ -316,7 +420,11 @@ export function App() {
           return;
         case "s":
           event.preventDefault();
-          void current.handleSave(event.shiftKey);
+          if (event.altKey) {
+            void current.handleSaveAll();
+          } else {
+            void current.handleSave(event.shiftKey);
+          }
           return;
         case "f":
           // Opens our floating dialog. CodeMirror's own panel is never
@@ -332,7 +440,11 @@ export function App() {
           // Closes the tab, not the window. Without preventDefault the
           // webview or the app menu would take this first.
           event.preventDefault();
-          if (current.active) void current.handleClose(current.active.id);
+          if (event.shiftKey) {
+            void current.handleCloseAll();
+          } else if (current.active) {
+            void current.handleClose(current.active.id);
+          }
           return;
         case "z":
           // Wrapping is a view setting in Notepad++ (Ctrl+Alt+Z there, but
@@ -397,6 +509,17 @@ export function App() {
   return (
     <div className="app">
       <TabBar
+        leading={
+          <FileMenu
+            onNew={() => void handleNew()}
+            onOpen={() => void handleOpen()}
+            onSave={() => void handleSave(false)}
+            onSaveAs={() => void handleSave(true)}
+            onSaveAll={() => void handleSaveAll()}
+            onClose={() => active && void handleClose(active.id)}
+            onCloseAll={() => void handleCloseAll()}
+          />
+        }
         buffers={session.buffers}
         active={session.active}
         onSelect={handleSelect}

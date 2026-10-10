@@ -110,9 +110,17 @@ notepad/
 - [x] **The promise verified end-to-end in the real app**: typed into two tabs, `kill -9`
       (no terminate, no flush), relaunched → both tabs back with text, on the active tab.
 - [x] **Size:** `.app` 3.7 MB · `.dmg` 2.0 MB.
+- [x] **File associations** for ~70 extensions, on all three platforms. macOS gets documents via
+      `RunEvent::Opened`; Windows and Linux via argv, with `tauri-plugin-single-instance` so a
+      second launch hands its files to the running app instead of starting a rival process that
+      would fight over `session.json`.
+- [x] **Close All** (one confirmation — the single deliberate exception to the no-prompt rule)
+      and **Save All** (asks per unsaved tab, cancelling one skips it rather than aborting the
+      run), reachable from a **File menu** at the left of the tab strip and by
+      `Cmd/Ctrl+Shift+W` / `Cmd/Ctrl+Alt+S`.
+- [x] **Security audit done and fixed** — see below. 65 tests green.
 - [ ] Windows + Linux: built by CI, never run on real hardware. Benjamin to test the `.exe`.
-- [ ] Not yet: open a file by double-clicking it in Finder/Explorer (no file-association or
-      argv handling), multiple windows, macro recording, column mode.
+- [ ] Not yet: multiple windows, macro recording, column mode, document map.
 
 ### Verified behaviours worth not breaking
 `cargo test -p bhn-core` holds the guarantees, and each was proved non-vacuous by sabotaging the
@@ -193,3 +201,54 @@ here because the findings cost real time and would otherwise be re-derived:
   built library rather than guessed: HTML is **`hypertext`**, PHP is **`phpscript`**, and **there
   is no `javascript` lexer** (Notepad++ routes JS through `cpp`). No `go`, `swift` or
   `typescript` lexer exists either.
+
+---
+
+## 🔒 Security audit — 2026-10-10, before first publication
+
+Run as a deploy gate per the standing rule (build → test → **audit** → fix → deploy), adversarially
+and by lens, then re-checked independently by Codex. Every fix below carries a test, and every
+test was proved non-vacuous by sabotaging the fix and watching it fail.
+
+### Fixed
+1. **Store was world-readable.** `session.json` and every `buffers/*.txt` were created `0644`
+   inside `0755` directories, so any other account on the machine could read scratch notes —
+   which is exactly where a password or token gets pasted "just for a second". Now created
+   `0600` via `OpenOptions::mode()` **at creation**, not chmod-ed afterwards (a chmod leaves a
+   window where the file is world-readable), with directories forced to `0700` on every open so
+   stores made by an earlier build are tightened too. Windows is unaffected — `%APPDATA%` is
+   already ACL-restricted — hence the `#[cfg(unix)]`.
+2. **`open_path` was unbounded and did not check the file type.** With file associations added,
+   a double-clicked multi-gigabyte log, or a character device such as `/dev/zero` (which never
+   ends), would be pulled into memory and then across the IPC boundary into the editor. Now
+   `metadata()` is consulted first: regular files only, `MAX_OPEN_BYTES` = 64 MiB.
+3. **Saving widened file permissions.** `write_user_file` writes a temp file and renames it over
+   the target, and a rename replaces the destination's permissions with the temp's — so
+   re-saving a file the user had deliberately made `0600` silently made it world-readable. The
+   destination's existing permissions are now copied onto the temp before the rename.
+
+4. **A late autosave could put a closed tab's text back on disk.** `update_text` wrote the
+   snapshot *before* checking the tab still existed, and the UI debounces that call by 300 ms —
+   so a keystroke just before a close landed just after it, recreating the file, which then sat
+   there until the next launch pruned it as an orphan. Someone who closes a tab to be rid of what
+   is in it should be rid of it. Now an id that is no longer in the session is ignored.
+   (Found by walking the data-loss lens by hand, not by a tool.)
+
+### Checked and found clean (worth not re-deriving)
+- **`core:default` is read-only introspection.** I suspected it might include
+  `allow-create-webview-window`, which would let a compromised webview open a remote page. It
+  does not: it expands to `get-all-webviews`, window/app *getters*, `path`, `event`, `image`,
+  `resources`, `menu`, `tray` only. The capability set is genuinely minimal; **this suspicion
+  died under refutation** and should not be re-raised.
+- No `dangerouslySetInnerHTML`, `innerHTML`, `eval` or `new Function` anywhere in the UI; file
+  contents reach CodeMirror as text, never as markup.
+- No `Command::new`, no process spawning, no HTTP client, no socket anywhere in the app. The only
+  `std::process` call in the tree is `abort()` inside the power-cut test.
+- Buffer ids are validated (`is_safe_id`: alphanumeric/`-`/`_`, ≤128, not `.`/`..`) before being
+  used to build a path, so a crafted `session.json` cannot escape the store.
+
+### Residual risk, accepted and documented
+`save(id, path)` is an arbitrary file write and `open_path(path)` an arbitrary read, both callable
+by any JS in the webview. That is unavoidable for an editor. It is contained by the strict CSP
+(no remote scripts/styles/frames, everything bundled), no remote content ever being loaded, and
+no HTML sink in the UI — so there is no route for foreign script to run in the first place.

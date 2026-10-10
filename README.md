@@ -23,6 +23,8 @@ BHNotepad treats them that way:
 
 - **Quit with unsaved tabs → no dialog.** Not "save", not "discard", not "are you sure".
 - **Close a tab → no dialog.** It just closes.
+- The single exception is **Close All**, which asks once, because it throws away every scratch
+  note at the same time.
 - **Reopen → everything back:** tab order, the tab you were on, and the caret where you left it.
 - **Pull the power out → still back.** Text reaches disk as you type, not when you quit.
 
@@ -60,7 +62,11 @@ and checks all six tabs and their text came back.
   whole word, regular expressions, count, select all, replace all.
 - **Per-tab word wrap**, line numbers, current-line highlight, bracket matching.
 - **Light and dark** following the system, with no setting to forget about.
-- **Open and save real files** when a note graduates into one.
+- **Open and save real files** when a note graduates into one, including by double-clicking one
+  in Finder or Explorer — BHNotepad registers itself for about 70 text and source extensions.
+- **Save All** walks your unsaved tabs one at a time, asking where each should go.
+- **Close All** clears the board behind a single confirmation that tells you how many tabs have
+  never been saved.
 
 ## 💻 Platform support
 
@@ -100,6 +106,8 @@ Click **More info → Run anyway**. The installer is per-user and needs no admin
 | Open file | `Cmd/Ctrl + O` |
 | Save / Save As | `Cmd/Ctrl + S` / `+ Shift + S` |
 | Close tab | `Cmd/Ctrl + W` |
+| Close all tabs | `Cmd/Ctrl + Shift + W` |
+| Save all tabs | `Cmd/Ctrl + Alt + S` |
 | Find / Replace | `Cmd/Ctrl + F` / `+ H` |
 | Next / previous tab | `Ctrl + Tab` / `Ctrl + Shift + Tab` |
 | Toggle word wrap | `Cmd/Ctrl + Shift + Z` |
@@ -111,7 +119,9 @@ Click **More info → Run anyway**. The installer is per-user and needs no admin
   API that does not exist here. Nothing short of running Notepad++ itself will load them.
 - **Not a clone.** No macro recording, column-mode editing, document map or FTP browser yet.
 - **One window.** Tabs live in a single window for now.
-- Very large files (hundreds of megabytes) are not its strength.
+- **Files are capped at 64 MB.** Opening is unbounded otherwise, and the text is held in memory,
+  handed to the editor and snapshotted on every autosave — a cap is the honest limit rather than
+  a hang. Very large files are not this editor's strength in any case.
 
 ## 🔨 Building
 

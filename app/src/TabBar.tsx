@@ -10,6 +10,8 @@ import { useRef, useState } from "react";
 import type { Buffer } from "./ipc";
 
 interface Props {
+  /** Rendered at the left of the strip — the File menu. */
+  leading?: React.ReactNode;
   buffers: Buffer[];
   active: number;
   onSelect: (index: number) => void;
@@ -18,12 +20,21 @@ interface Props {
   onReorder: (from: number, to: number) => void;
 }
 
-export function TabBar({ buffers, active, onSelect, onClose, onNew, onReorder }: Props) {
+export function TabBar({
+  leading,
+  buffers,
+  active,
+  onSelect,
+  onClose,
+  onNew,
+  onReorder,
+}: Props) {
   const dragFrom = useRef<number | null>(null);
   const [dragOver, setDragOver] = useState<number | null>(null);
 
   return (
     <div className="tabbar" role="tablist">
+      {leading}
       <div className="tabs">
         {buffers.map((buffer, index) => (
           <div
