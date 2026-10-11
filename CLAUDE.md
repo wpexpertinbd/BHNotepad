@@ -857,3 +857,34 @@ is how Move Tab to New Window was finally driven for real.
 `cargo fmt --all` reformatted the Tauri shell, which had been hand-indented with tabs — hence the
 large diff in `app/src-tauri/src/lib.rs`. CI now checks `--all` so it stays consistent and nobody
 has to guess the house style of that file again.
+
+### Step 2 — dragging a tab out of the strip (2026-10-11)
+
+Let go of a dragged tab anywhere but its own strip and it becomes a window where it was dropped;
+let go over another BHNotepad window and it moves into that one instead.
+
+**The decision is made in Rust, not from the drag event.** The web layer only reports *that* a tab
+was let go off the strip; `drop_tab_outside` then asks the platform where the pointer actually is
+and compares it against the real window rectangles. HTML5 drag-and-drop knows nothing outside its
+own webview, and `dragend` coordinates for a drop outside the window are not something to build a
+feature on. Doing it this way also made "dropped on my other window" fall out for free, and lets
+the new window open at the drop point.
+
+⚠️ **Synthetic input cannot start a macOS drag session.** Neither `app_drag` nor a full-screen
+`left_mouse_down` → `mouse_move` → `left_mouse_up` sequence produced a `dragstart` in WebKit — the
+tab selected, the pointer moved, and nothing dragged. So the gesture end to end was verified by
+**Benjamin**, not by me: *"with new 3 I was able to open a new window"*, confirmed in the session
+file as a second window holding that tab. What IS covered here:
+- `inside()` has unit tests in the shell crate (new — it had none), including the bottom-right edge
+  being exclusive. Proved non-vacuous by changing `<` to `<=`.
+- The dragend wiring was exercised in a harness with real `DragEvent`s: let go off the strip →
+  reported; dropped on a tab → not reported; dropped on the strip's empty end → not reported; and a
+  drag following one that landed does not inherit its flag.
+
+### ⚠️ A hook below App.tsx's early return — the same bug, twice in one session
+Caught the second time only because I checked the line numbers after an automated edit placed the
+new `useCallback` below the `if (!session || !active)` return. `scripts/check-hook-order.mjs` now
+fails the build on it, and runs in CI.
+⚠️ **Its first version was vacuous**: it skipped any line containing `=>` (meaning to ignore JSX
+props), which also skipped every real `useCallback(() => …)`. It passed against deliberately broken
+code. Anchoring the pattern to the start of a statement is what separates a hook call from a prop.

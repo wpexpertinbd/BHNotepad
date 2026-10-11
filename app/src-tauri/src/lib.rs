@@ -486,6 +486,112 @@ fn move_tab_to_new_window(
     Ok(refreshed)
 }
 
+/// A tab was dragged out of its strip and let go. Works out what that meant.
+///
+/// The drag is HTML5 drag-and-drop inside one webview, which knows nothing
+/// about anything outside it — so rather than trusting the drop event's
+/// coordinates, this asks the platform where the pointer actually is and
+/// compares it against the real windows:
+///
+/// - over another BHNotepad window → the tab moves into that window,
+/// - over this window → nothing happens; an ordinary reorder was already done,
+/// - anywhere else → a new window, placed where it was dropped.
+///
+/// Returns the asking window's refreshed view, or `None` when nothing changed.
+#[tauri::command]
+fn drop_tab_outside(
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<Option<Session>> {
+    let Ok(cursor) = app.cursor_position() else {
+        return Ok(None);
+    };
+    let (x, y) = (cursor.x as i32, cursor.y as i32);
+
+    // Dropped back inside the window it came from: the strip has already done
+    // whatever reordering was wanted.
+    if window_contains(&window, x, y) {
+        return Ok(None);
+    }
+
+    let landing = app
+        .webview_windows()
+        .into_iter()
+        .find(|(label, other)| label != window.label() && webview_contains(other, x, y))
+        .map(|(label, _)| label);
+
+    let mut workspace = state.workspace.lock().map_err(to_message)?;
+    if workspace.session().buffer(&id).is_none() {
+        return Ok(None);
+    }
+
+    if let Some(target) = landing {
+        workspace.move_to_window(&id, &target).map_err(to_message)?;
+        let refreshed = view(&workspace, window.label());
+        drop(workspace);
+        if let Some(target) = app.get_webview_window(&target) {
+            let _ = target.emit(SESSION_CHANGED, ());
+            let _ = target.set_focus();
+        }
+        return Ok(Some(refreshed));
+    }
+
+    // A window of its own, with its top-left near the pointer so the tab
+    // lands roughly where it was let go rather than wherever the system
+    // would have put a new window.
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let target = workspace.open_window().map_err(to_message)?;
+    workspace.move_to_window(&id, &target).map_err(to_message)?;
+    workspace.set_window_geometry(
+        &target,
+        (f64::from(x) / scale) as i32 - DROP_OFFSET.0,
+        (f64::from(y) / scale) as i32 - DROP_OFFSET.1,
+        NEW_WINDOW.0 as u32,
+        NEW_WINDOW.1 as u32,
+    );
+    let record = workspace
+        .session()
+        .window(&target)
+        .cloned()
+        .ok_or_else(|| "the new window vanished before it opened".to_string())?;
+    workspace.persist().map_err(to_message)?;
+    let refreshed = view(&workspace, window.label());
+    drop(workspace);
+
+    build_window(&app, &record).map_err(|error| format!("could not open a window: {error}"))?;
+    Ok(Some(refreshed))
+}
+
+/// Where the new window's top-left sits relative to the drop point, in logical
+/// pixels: far enough up and left that the pointer lands on the tab strip.
+const DROP_OFFSET: (i32, i32) = (60, 20);
+
+/// Whether a physical screen point is inside a window.
+fn window_contains(window: &tauri::Window, x: i32, y: i32) -> bool {
+    inside(window.outer_position(), window.outer_size(), x, y)
+}
+
+fn webview_contains(window: &tauri::WebviewWindow, x: i32, y: i32) -> bool {
+    inside(window.outer_position(), window.outer_size(), x, y)
+}
+
+fn inside(
+    origin: tauri::Result<tauri::PhysicalPosition<i32>>,
+    size: tauri::Result<tauri::PhysicalSize<u32>>,
+    x: i32,
+    y: i32,
+) -> bool {
+    let (Ok(origin), Ok(size)) = (origin, size) else {
+        return false;
+    };
+    x >= origin.x
+        && y >= origin.y
+        && x < origin.x + size.width as i32
+        && y < origin.y + size.height as i32
+}
+
 /// Shows a file in Finder, Explorer or the desktop file manager.
 #[tauri::command]
 fn reveal(path: String) -> CommandResult<()> {
@@ -1085,6 +1191,7 @@ pub fn run() {
             reveal,
             move_to_trash,
             move_tab_to_new_window,
+            drop_tab_outside,
             check_update,
             set_auto_update,
             download_update,
@@ -1118,4 +1225,60 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inside;
+    use tauri::{PhysicalPosition, PhysicalSize};
+
+    fn at(
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) -> (
+        tauri::Result<PhysicalPosition<i32>>,
+        tauri::Result<PhysicalSize<u32>>,
+    ) {
+        (Ok(PhysicalPosition::new(x, y)), Ok(PhysicalSize::new(w, h)))
+    }
+
+    /// The arithmetic behind "was this tab let go over a window, or past it".
+    /// Getting an edge wrong here tears a tab off when the user meant to drop
+    /// it back, or refuses to tear one off at all.
+    #[test]
+    fn a_point_inside_a_window_is_inside_it() {
+        let (origin, size) = at(100, 200, 800, 600);
+        assert!(inside(origin, size, 500, 500));
+    }
+
+    #[test]
+    fn the_top_left_corner_counts_as_inside_and_the_bottom_right_does_not() {
+        let (origin, size) = at(100, 200, 800, 600);
+        assert!(inside(
+            Ok(*origin.as_ref().unwrap()),
+            Ok(*size.as_ref().unwrap()),
+            100,
+            200
+        ));
+        // 100 + 800 = 900 is the first column PAST the window.
+        assert!(!inside(origin, size, 900, 800));
+    }
+
+    #[test]
+    fn a_point_outside_any_edge_is_outside() {
+        for (x, y) in [(99, 500), (500, 199), (901, 500), (500, 801)] {
+            let (origin, size) = at(100, 200, 800, 600);
+            assert!(!inside(origin, size, x, y), "{x},{y} should be outside");
+        }
+    }
+
+    #[test]
+    fn a_window_that_will_not_report_its_geometry_contains_nothing() {
+        // Rather than guessing, which would tear a tab off at random.
+        let origin = Err(tauri::Error::WebviewNotFound);
+        let size = Ok(PhysicalSize::new(800, 600));
+        assert!(!inside(origin, size, 500, 500));
+    }
 }

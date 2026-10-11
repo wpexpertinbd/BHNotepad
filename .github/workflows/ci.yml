@@ -47,6 +47,12 @@ jobs:
         # Includes the power-cut test, which spawns a child that aborts.
         run: cargo test -p bhn-core
 
+      - name: Shell tests
+        # The Tauri shell had no tests until the window hit-testing arrived.
+        # That arithmetic decides whether a dragged tab is torn off or put
+        # back, so an off-by-one on an edge is a user-visible bug.
+        run: cargo test -p bhnotepad
+
       - name: Tests (with the update checker)
         # The shipped app builds this feature, so it has to be tested too —
         # including the host allowlist that keeps a download on github.com.
@@ -68,6 +74,10 @@ jobs:
       - name: Dark palette is consistent
         # Guards the deliberate duplication in styles.css — see the script.
         run: node scripts/check-theme-tokens.mjs
+
+      - name: No React hooks below App.tsx's early return
+        # A conditional hook blanks the whole window with no error anywhere.
+        run: node scripts/check-hook-order.mjs
 
       - name: Typecheck and build
         run: npm run build

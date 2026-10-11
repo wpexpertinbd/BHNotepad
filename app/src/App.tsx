@@ -836,6 +836,23 @@ export function App() {
     }
   }, [active, fail, note]);
 
+  // A tab let go outside the strip. Rust works out whether that was another
+  // window, a new one, or nothing at all — null means nothing changed, which
+  // is the common case of dropping it back on the editor.
+  const handleDropOutside = useCallback(
+    async (id: string) => {
+      try {
+        const updated = await ipc.dropTabOutside(id);
+        if (!updated) return;
+        setSession(updated);
+        forgetState.current?.(id);
+      } catch (error) {
+        fail("Could not move that tab", error);
+      }
+    },
+    [fail],
+  );
+
   // ── Render ────────────────────────────────────────────────────────────────
   //
   // ⚠️ EVERY hook has to be above this early return. A `useCallback` placed
@@ -1064,6 +1081,7 @@ export function App() {
         onClose={(id) => void handleClose(id)}
         onNew={() => void handleNew()}
         onReorder={(from, to) => void handleReorder(from, to)}
+        onDropOutside={(id) => void handleDropOutside(id)}
       />
 
       {body === undefined ? (

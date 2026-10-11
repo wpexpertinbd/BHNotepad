@@ -75,6 +75,11 @@ export const moveToTrash = (id: string) => invoke<Session>("move_to_trash", { id
  *  Returns THIS window's session, with the tab gone from its strip. */
 export const moveTabToNewWindow = (id: string) =>
   invoke<Session>("move_tab_to_new_window", { id });
+/** A tab was let go outside its own strip. The Rust side looks at where the
+ *  pointer actually is and decides: another window, a new one, or nothing.
+ *  Null means nothing changed. */
+export const dropTabOutside = (id: string) =>
+  invoke<Session | null>("drop_tab_outside", { id });
 export const unsavedTabs = () => invoke<Buffer[]>("unsaved_tabs");
 export const saveBuffer = (id: string, path?: string) =>
   invoke<Session>("save", { id, path: path ?? null });

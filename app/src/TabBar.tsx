@@ -25,6 +25,14 @@ interface Props {
   onClose: (id: string) => void;
   onNew: () => void;
   onReorder: (from: number, to: number) => void;
+  /**
+   * A tab was dragged out of the strip and let go somewhere else.
+   *
+   * The web layer cannot see past its own window, so it does not try: it
+   * reports the tab and lets the Rust side compare the real pointer position
+   * against the real windows.
+   */
+  onDropOutside: (id: string) => void;
 }
 
 export function TabBar({
@@ -35,8 +43,12 @@ export function TabBar({
   onClose,
   onNew,
   onReorder,
+  onDropOutside,
 }: Props) {
   const dragFrom = useRef<number | null>(null);
+  /** Set when a drag ended on a tab in THIS strip, so `dragend` can tell an
+   *  ordinary reorder from a tab being pulled out of the window. */
+  const droppedHere = useRef(false);
   const [dragOver, setDragOver] = useState<number | null>(null);
   const strip = useRef<HTMLDivElement | null>(null);
   /** Whether there are tabs hidden off each end, which is what shows the
@@ -211,7 +223,12 @@ export function TabBar({
           event.preventDefault();
           edgeScroll(event.clientX);
         }}
-        onDrop={stopEdgeScroll}
+        onDrop={() => {
+          // The gap after the last tab counts as the strip: dropping there is
+          // a reorder to the end, not a tear-off.
+          droppedHere.current = true;
+          stopEdgeScroll();
+        }}
       >
         {buffers.map((buffer, index) => (
           <div
@@ -231,6 +248,7 @@ export function TabBar({
             draggable
             onDragStart={() => {
               dragFrom.current = index;
+              droppedHere.current = false;
             }}
             onDragOver={(event) => {
               event.preventDefault();
@@ -240,6 +258,7 @@ export function TabBar({
             onDrop={(event) => {
               event.preventDefault();
               stopEdgeScroll();
+              droppedHere.current = true;
               const from = dragFrom.current;
               dragFrom.current = null;
               setDragOver(null);
@@ -247,8 +266,13 @@ export function TabBar({
             }}
             onDragEnd={() => {
               stopEdgeScroll();
+              const landed = droppedHere.current;
+              droppedHere.current = false;
               dragFrom.current = null;
               setDragOver(null);
+              // Let go anywhere but on this strip — over another BHNotepad
+              // window, or over the desktop. Rust decides which.
+              if (!landed) onDropOutside(buffer.id);
             }}
             onMouseDown={(event) => {
               // Middle-click closes, as in Notepad++ and every browser.
