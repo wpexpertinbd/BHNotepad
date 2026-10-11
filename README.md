@@ -64,6 +64,9 @@ and checks all six tabs and their text came back.
 
 - **Tabs** — drag to reorder, middle-click to close, `new 1`/`new 2` naming that reuses freed
   numbers the way Notepad++ does.
+- **Tab paging.** Once there are more tabs than fit across the window, **‹** and **›** appear
+  beside **+** and move a whole strip-width at a time, so the tabs that scrolled off the end stay
+  reachable instead of being stuck behind the edge. The active tab is always brought into view.
 - **Syntax highlighting** for ~45 languages, picked automatically from the file name.
 - **Find & Replace** in a proper floating dialog, not a strip glued to the window: match case,
   whole word, regular expressions, count, select all, replace all.

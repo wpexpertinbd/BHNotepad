@@ -279,6 +279,29 @@ body {
   background: var(--tab-hover-bg);
 }
 
+/* The page arrows sit just before +, and only exist while tabs are hidden. */
+.tabpage {
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  width: 26px;
+  cursor: default;
+  flex: 0 0 auto;
+}
+
+.tabpage:hover:not(:disabled) {
+  background: var(--tab-hover-bg);
+  color: var(--text);
+}
+
+/* Kept in place rather than removed at the ends of the strip, so the + button
+ * does not jump sideways while paging. */
+.tabpage:disabled {
+  opacity: 0.3;
+}
+
 .newtab {
   border: 0;
   background: transparent;

@@ -721,3 +721,47 @@ copy, both fail it with the offending line named.
 
 Also set `color-scheme: light` / `dark` on the forced choices, so native scrollbars and form
 controls stop disagreeing with the palette.
+
+---
+
+## 📑 Tab paging — the hidden tabs were genuinely unreachable (2026-10-11)
+
+Benjamin, with 15+ tabs open: *"I don't able to see them at all until I delete some"*.
+
+He was right, and it was worse than slow — `.tabs` was `overflow-x: auto` with
+`scrollbar-width: none`, so the tabs past the window edge had **no scrollbar to drag, nothing to
+click, and no keyboard route**. Closing tabs really was the only way back to tab 12.
+
+**Added ‹ and › before the + button**, as Notepad++ has: each moves one whole strip-width and
+lands on a tab boundary. They appear only while tabs are actually hidden, and each is disabled at
+its end of the strip (kept in place rather than removed, so + does not jump sideways). The active
+tab is now also scrolled into view whenever it changes — Ctrl+Tab could previously select a tab
+that was nowhere on screen.
+
+⚠️ **Deliberately did NOT look at the Notepad++ source**, although he offered it. Notepad++ is
+GPLv3 and this project is MIT — the standing rule at the top of this file. The behaviour was
+copied from using it, which is not a derivative work; the code was not.
+
+### Two traps, both found by measuring rather than reading the code
+1. **`offsetLeft` is measured from the nearest POSITIONED ancestor.** `.tabs` is not positioned,
+   so it answered in the page's coordinates, not the strip's, and paging landed mid-tab — six
+   pixels of "new 17" showing at the left edge. Fixed with
+   `getBoundingClientRect().left - strip.getBoundingClientRect().left + strip.scrollLeft`.
+   ⚠️ A harness page reproducing the strip in the browser proved the arithmetic exact *before*
+   the next app rebuild — four pages, every one landing on a boundary. Three minutes of harness
+   beat another four-minute Tauri build.
+2. **`scrollTo({behavior: "smooth"})` leaves the strip stopped between two tabs.** The animation
+   fires `scroll` repeatedly on its way, and anything touching the strip mid-flight strands it.
+   A page is a jump, not a journey — `el.scrollLeft = …` outright is deterministic, and that is
+   what the harness had proved.
+
+### ⚠️ Testing a second copy of this app needs a DIFFERENT bundle identifier
+`tauri-plugin-single-instance` means a dev build launched while the installed app is running just
+**hands off and exits** — his real session was open, so the test build never appeared. Building
+with `identifier` temporarily set to `com.biswashost.bhnotepad.tabtest`, plus `HOME` pointed at a
+scratch directory, gives a genuinely separate app, session store and `localStorage`.
+⚠️ `git checkout app/src-tauri/tauri.conf.json` immediately after the build — that identifier must
+never reach a commit.
+⚠️ And trimming `session.json` by hand is not enough to reduce the tab count: `recover_orphans`
+turns every unreferenced snapshot back into a tab on the next launch, exactly as designed. Delete
+the `buffers/*.txt` files too.
