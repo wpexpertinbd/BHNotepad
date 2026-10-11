@@ -51,6 +51,14 @@ jobs:
         # The Tauri shell had no tests until the window hit-testing arrived.
         # That arithmetic decides whether a dragged tab is torn off or put
         # back, so an off-by-one on an edge is a user-visible bug.
+        #
+        # ⚠️ NOT on Linux. This job exists to prove the core is portable, so
+        # the runner has no GTK or WebKit development packages — and the shell
+        # crate pulls in glib through Tauri, which then fails to build with
+        # "Package glib-2.0 was not found". Installing them here would make
+        # every core run slower to test something this job is not for; the
+        # Linux shell is still built in full by release.yml.
+        if: matrix.os != 'ubuntu-latest'
         run: cargo test -p bhnotepad
 
       - name: Tests (with the update checker)
