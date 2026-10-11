@@ -317,6 +317,48 @@ body {
   color: var(--text);
 }
 
+.fontdialog {
+  width: 460px;
+}
+
+.fontdialog select,
+.fontdialog input[type="text"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fontdialog-size {
+  min-width: 52px;
+  text-align: center;
+  color: var(--muted);
+}
+
+/* The preview is the reason this dialog exists, so it gets room and the
+ * editor's own background rather than the panel's. */
+.fontdialog-preview {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: var(--editor-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  line-height: 1.35;
+  white-space: pre;
+  overflow-x: auto;
+  user-select: text;
+}
+
+.fontdialog-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.fontdialog-note code {
+  font-family: var(--mono);
+}
+
 /* ── Editor ───────────────────────────────────────────────────────────── */
 
 .editor {

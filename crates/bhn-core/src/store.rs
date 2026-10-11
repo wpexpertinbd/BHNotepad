@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::encoding;
 use crate::session::{is_safe_id, Session};
 
 #[derive(Debug, thiserror::Error)]
@@ -400,6 +401,9 @@ pub struct Decoded {
     /// `"crlf"` when the file predominantly used Windows line endings, so the
     /// save path can put them back.
     pub eol: &'static str,
+    /// Which encoding was used to read it, so saving can put the same bytes
+    /// back. See [`crate::encoding`].
+    pub encoding: &'static str,
 }
 
 /// Decodes a file's bytes, recording what was normalised rather than doing it
@@ -409,13 +413,24 @@ pub struct Decoded {
 /// way out is what keeps a one-word change to a Windows file from rewriting
 /// every line in it.
 pub fn decode_file(bytes: Vec<u8>) -> Decoded {
+    decode_file_as(bytes, None)
+}
+
+/// Decodes a file, either in a stated encoding or in whichever one fits.
+///
+/// `wanted` is `Some` only when the user has chosen one from Reopen with
+/// Encoding — otherwise the encoding is sniffed, because the overwhelmingly
+/// common case is UTF-8 and the interesting one is an NFO full of CP437 box
+/// drawing that UTF-8 would turn into replacement characters.
+pub fn decode_file_as(bytes: Vec<u8>, wanted: Option<&str>) -> Decoded {
     let had_bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
     let body = if had_bom { bytes[3..].to_vec() } else { bytes };
 
-    let (text, lossy) = match String::from_utf8(body) {
-        Ok(text) => (text, false),
-        Err(error) => (String::from_utf8_lossy(error.as_bytes()).into_owned(), true),
+    let encoding = match wanted {
+        Some(name) => encoding::normalize(name),
+        None => encoding::sniff(&body),
     };
+    let (text, lossy) = encoding::decode(&body, encoding);
 
     // "Predominantly" rather than "any": a file with mixed endings is usually
     // mostly one of them, and that is what the user expects to keep.
@@ -427,6 +442,7 @@ pub fn decode_file(bytes: Vec<u8>) -> Decoded {
         text: text.replace("\r\n", "\n"),
         lossy,
         eol,
+        encoding,
     }
 }
 

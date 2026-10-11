@@ -20,6 +20,8 @@ export interface Buffer {
   /** The file was not valid UTF-8 and characters were replaced, so saving
    *  over the original is refused. */
   lossy: boolean;
+  /** Which encoding the file was read in and will be written back in. */
+  encoding: string;
 }
 
 /** Mirrors `bhn_core::session::Session`. */
@@ -80,6 +82,12 @@ export const moveTabToNewWindow = (id: string) =>
  *  Null means nothing changed. */
 export const dropTabOutside = (id: string) =>
   invoke<Session | null>("drop_tab_outside", { id });
+
+/** The encodings the core can read and write, as `[id, label]` pairs. */
+export const encodings = () => invoke<[string, string][]>("encodings");
+/** Re-reads a file in a chosen encoding, discarding unsaved edits. */
+export const reopenWithEncoding = (id: string, encoding: string) =>
+  invoke<Opened>("reopen_with_encoding", { id, encoding });
 export const unsavedTabs = () => invoke<Buffer[]>("unsaved_tabs");
 export const saveBuffer = (id: string, path?: string) =>
   invoke<Session>("save", { id, path: path ?? null });

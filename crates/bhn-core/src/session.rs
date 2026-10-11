@@ -58,6 +58,14 @@ pub struct Buffer {
     /// not understood, so it is refused; Save As is still allowed.
     #[serde(default)]
     pub lossy: bool,
+    /// The encoding the file was read in, and will be written back in.
+    ///
+    /// ⚠️ A CP437 file saved as UTF-8 is a corrupted file: every box-drawing
+    /// character becomes two or three bytes that no DOS-era viewer can read.
+    /// Defaults to UTF-8, which is what every session written before this
+    /// existed contained.
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
     /// Which window this tab lives in — a [`WindowRecord::id`].
     ///
     /// Defaults to [`MAIN_WINDOW`], so every session written before windows
@@ -73,6 +81,10 @@ pub const MAIN_WINDOW: &str = "main";
 
 fn default_window() -> String {
     MAIN_WINDOW.to_string()
+}
+
+fn default_encoding() -> String {
+    crate::encoding::UTF8.to_string()
 }
 
 /// One editor window, so a second window can live on a second monitor and be
@@ -150,6 +162,7 @@ impl Buffer {
             word_wrap: false,
             eol: default_eol(),
             lossy: false,
+            encoding: default_encoding(),
             window: default_window(),
         }
     }
@@ -168,6 +181,7 @@ impl Buffer {
             word_wrap: false,
             eol: default_eol(),
             lossy: false,
+            encoding: default_encoding(),
             window: default_window(),
         }
     }

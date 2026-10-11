@@ -68,6 +68,14 @@ and checks all six tabs and their text came back.
   beside **+** and move a whole strip-width at a time, so the tabs that scrolled off the end stay
   reachable instead of being stuck behind the edge. The active tab is always brought into view.
 - **Syntax highlighting** for ~45 languages, picked automatically from the file name.
+- **Choose the editor font** — **View → Font…**, with a preview that shows box-drawing characters
+  and the easily-confused ones (`Il1|` `O0o`) so you can see what you are picking before you pick
+  it. Any font on your machine, not just the listed ones.
+- **Reads old code pages, and writes them back unchanged.** An NFO or ANSI-art file is **CP437**,
+  not UTF-8, so every box-drawing character used to arrive as `` — no font could have fixed
+  that. CP437 and Windows-1252 are now detected on open, shown in the status bar, and saved back
+  in the same encoding, byte for byte. **File → Reopen with Encoding** settles it when the guess
+  is wrong.
 - **Find & Replace** in a proper floating dialog, not a strip glued to the window: match case,
   whole word, regular expressions, count, select all, replace all.
 - **Per-tab word wrap**, line numbers, current-line highlight, bracket matching.
@@ -77,7 +85,7 @@ and checks all six tabs and their text came back.
 - **Open and save real files** when a note graduates into one, including by double-clicking one
   in Finder or Explorer — BHNotepad registers itself for about 70 text and source extensions.
 - **Line endings are preserved**: a Windows file is written back with CRLF, so a one-word change
-  does not show up as a diff touching every line.
+  does not show up as a diff touching every line. The same goes for its encoding.
 - **Update checking** — on launch (at most once a day), or on demand from the Help menu. It asks
   GitHub's releases API for the newest tag and nothing else: no identifier, no usage data, no
   telemetry. When there is a new version, a strip offers **Download** and then **Install and
@@ -170,9 +178,10 @@ back, and Uninstall works from then on. No registry editing needed.
 - **Notepad++ plugins do not work and never will.** They are Windows DLLs written against a Win32
   API that does not exist here. Nothing short of running Notepad++ itself will load them.
 - **Not a clone.** No macro recording, column-mode editing, document map or FTP browser yet.
-- **A file that is not valid UTF-8 can be read but not saved in place.** The bytes that could not
-  be decoded are shown as replacement characters, and writing those back would destroy them, so
-  Save over the original is refused and Save As is offered. Proper encoding support is a later job.
+- **Three encodings: UTF-8, CP437 and Windows-1252.** Between them they read most old text, but a
+  file in a multi-byte Asian encoding, or UTF-16, is not understood yet. If a file still shows
+  replacement characters after trying Reopen with Encoding, saving over it is refused rather than
+  destroying the bytes that could not be read.
 - **Files are capped at 512 MB**, and that number is measured rather than guessed. On a 24 GB
   Apple-silicon machine: 512 MB opens in about seven seconds and is fully editable; 768 MB
   displays but runs out of memory when it tries to save; 1 GB never finishes arriving in the

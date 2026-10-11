@@ -329,6 +329,39 @@ fn forget_closed(window: tauri::Window, state: State<'_, AppState>) -> CommandRe
     Ok(view(&workspace, window.label()))
 }
 
+/// The encodings the editor can read and write, for the status-bar menu.
+#[tauri::command]
+fn encodings() -> Vec<(String, String)> {
+    bhn_core::encoding::SUPPORTED
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_string(),
+                bhn_core::encoding::label(name).to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Re-reads a file in a chosen encoding, for when the guess was wrong.
+#[tauri::command]
+fn reopen_with_encoding(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    id: String,
+    encoding: String,
+) -> CommandResult<Opened> {
+    let mut workspace = state.workspace.lock().map_err(to_message)?;
+    let text = workspace
+        .reopen_with_encoding(&id, &encoding)
+        .map_err(to_message)?;
+    Ok(Opened {
+        session: view(&workspace, window.label()),
+        id,
+        text,
+    })
+}
+
 /// Throws away unsaved edits and re-reads the file from disk.
 #[tauri::command]
 fn reload(window: tauri::Window, state: State<'_, AppState>, id: String) -> CommandResult<Opened> {
@@ -1192,6 +1225,8 @@ pub fn run() {
             move_to_trash,
             move_tab_to_new_window,
             drop_tab_outside,
+            encodings,
+            reopen_with_encoding,
             check_update,
             set_auto_update,
             download_update,

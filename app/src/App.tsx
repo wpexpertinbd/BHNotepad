@@ -22,6 +22,7 @@ import { MenuBar, ACCEL, ALT, SHIFT, type Menu } from "./MenuBar";
 import * as cmd from "./editorCommands";
 import { UpdateBanner } from "./UpdateBanner";
 import { FindDialog, type FindMode } from "./FindDialog";
+import { FontDialog } from "./FontDialog";
 import { SELECTABLE, labelFor } from "./languages";
 import type { EditorView } from "@codemirror/view";
 
@@ -56,6 +57,8 @@ export function App() {
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [version, setVersion] = useState("");
   const [theme, setTheme] = useState<cmd.ThemeChoice>(() => cmd.currentTheme());
+  const [fontOpen, setFontOpen] = useState(false);
+  const [charsets, setCharsets] = useState<[string, string][]>([]);
 
   // Applies a theme choice to the page AND to the native window, so a dark
   // editor on a light desktop does not sit under a light title bar. Passing
@@ -228,8 +231,19 @@ export function App() {
   // Restore the zoom level and theme this machine was last left at.
   useEffect(() => {
     cmd.applyFontSize(cmd.currentFontSize());
+    cmd.applyFont(cmd.currentFont());
     chooseTheme(cmd.currentTheme());
   }, [chooseTheme]);
+
+  // What encodings the core can read, for the status bar and File menu.
+  useEffect(() => {
+    void ipc
+      .encodings()
+      .then(setCharsets)
+      .catch(() => {
+        // A missing list only costs the menu; nothing else depends on it.
+      });
+  }, []);
 
   // Keep the window title showing the active tab, as Notepad++ does.
   useEffect(() => {
@@ -413,6 +427,26 @@ export function App() {
       fail("Could not restore that tab", error);
     }
   }, [fail, note]);
+
+  // Re-reads the file in a chosen encoding. Same shape as Reload — both throw
+  // away unsaved edits and make the file authoritative again — so the parked
+  // EditorState has to go the same way.
+  const handleReopenWith = useCallback(
+    async (charset: string) => {
+      if (!active?.path) return;
+      try {
+        const opened = await ipc.reopenWithEncoding(active.id, charset);
+        setTexts((all) => ({ ...all, [opened.id]: opened.text }));
+        setSession(opened.session);
+        forgetState.current?.(opened.id);
+        const label = charsets.find(([id]) => id === charset)?.[1] ?? charset;
+        note(`Reopened ${active.title} as ${label}`);
+      } catch (error) {
+        fail("Could not reopen that file", error);
+      }
+    },
+    [active, charsets, fail, note],
+  );
 
   const handleReload = useCallback(async () => {
     if (!active?.path) return;
@@ -905,6 +939,15 @@ export function App() {
           enabled: hasFile,
           run: () => void handleReload(),
         },
+        {
+          label: "Reopen with Encoding",
+          enabled: hasFile,
+          submenu: charsets.map(([id, label]) => ({
+            label: active?.encoding === id ? `${label} ✓` : label,
+            run: () => void handleReopenWith(id),
+          })),
+          emptyLabel: "No encodings available",
+        },
         { label: "Save", shortcut: `${ACCEL}S`, separated: true, run: () => void handleSave(false) },
         { label: "Save As…", shortcut: `${ACCEL}${ALT}S`, run: () => void handleSave(true) },
         { label: "Save a Copy As…", run: () => void handleSaveCopy() },
@@ -992,6 +1035,11 @@ export function App() {
         { label: "Zoom In", shortcut: `${ACCEL}+`, run: () => cmd.zoomIn() },
         { label: "Zoom Out", shortcut: `${ACCEL}-`, run: () => cmd.zoomOut() },
         { label: "Reset Zoom", shortcut: `${ACCEL}0`, run: () => cmd.zoomReset() },
+        {
+          label: "Font…",
+          separated: true,
+          run: () => setFontOpen(true),
+        },
         {
           label: "Theme",
           separated: true,
@@ -1100,6 +1148,15 @@ export function App() {
         />
       )}
 
+      {fontOpen && (
+        <FontDialog
+          onClose={() => setFontOpen(false)}
+          onChange={(family) =>
+            note(family ? `Font set to ${family}` : "Font set to the system default")
+          }
+        />
+      )}
+
       {find && (
         <FindDialog
           view={view}
@@ -1117,12 +1174,12 @@ export function App() {
           className={active.lossy ? "where is-warning" : "where"}
           title={
             active.lossy
-              ? `${active.path} is not UTF-8; parts could not be read, so saving over it is refused — use Save As`
+              ? `${active.path} could not be read fully in this encoding, so saving over it is refused — try File → Reopen with Encoding, or Save As`
               : (active.path ?? "Not saved to a file yet")
           }
         >
           {active.lossy
-            ? `${active.title} — not UTF-8, use Save As`
+            ? `${active.title} — wrong encoding? Try File → Reopen with Encoding`
             : (active.path ?? "Not saved to a file — kept in your session")}
         </span>
         <span className="spacer" />
@@ -1152,8 +1209,16 @@ export function App() {
           ))}
         </select>
         <span className="metric">{active.eol === "crlf" ? "CRLF" : "LF"}</span>
-        <span className={active.lossy ? "metric is-warning" : "metric"}>
-          {active.lossy ? "UTF-8 (lossy)" : "UTF-8"}
+        <span
+          className={active.lossy ? "metric is-warning" : "metric"}
+          title={
+            active.lossy
+              ? "Some bytes could not be read in this encoding — File → Reopen with Encoding"
+              : "File → Reopen with Encoding"
+          }
+        >
+          {(charsets.find(([id]) => id === active.encoding)?.[1] ?? "UTF-8") +
+            (active.lossy ? " (lossy)" : "")}
         </span>
       </div>
     </div>

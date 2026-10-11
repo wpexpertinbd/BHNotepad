@@ -215,3 +215,102 @@ export function applyTheme(choice: ThemeChoice): ThemeChoice {
   }
   return choice;
 }
+
+// ── Font ─────────────────────────────────────────────────────────────────
+
+/**
+ * The editor font, asked for in issue #1.
+ *
+ * `--mono` is the one place the family is decided, so changing it moves the
+ * editor, the gutter and the Find dialog together. The stored value is a
+ * family NAME; the generic fallbacks are appended here so a font that is
+ * uninstalled later degrades to a monospace rather than to the UI font.
+ */
+const FONT_KEY = "bhnotepad.fontFamily";
+
+/** What `--mono` is without a choice: whatever the platform calls monospace. */
+export const SYSTEM_FONT = "";
+
+/**
+ * Fonts worth offering, if the machine has them.
+ *
+ * ⚠️ A webview cannot list installed fonts — `queryLocalFonts()` is Chromium
+ * only and WebKit has nothing equivalent — so this is a curated list that gets
+ * PROBED, and the box below it accepts any name for anything not here. The
+ * list leans towards fonts with box-drawing glyphs, because the request that
+ * started this was about reading ANSI art.
+ */
+export const FONT_CANDIDATES = [
+  // macOS
+  "Menlo", "Monaco", "SF Mono", "Andale Mono", "PT Mono", "Courier New",
+  // Windows
+  "Consolas", "Cascadia Mono", "Cascadia Code", "Lucida Console", "Lucida Sans Typewriter",
+  // Linux
+  "DejaVu Sans Mono", "Liberation Mono", "Ubuntu Mono", "Noto Sans Mono", "FreeMono",
+  // Installed by developers on any platform
+  "JetBrains Mono", "Fira Code", "Fira Mono", "Source Code Pro", "IBM Plex Mono",
+  "Hack", "Inconsolata", "Roboto Mono", "Iosevka", "Terminus", "Perfect DOS VGA 437",
+];
+
+/**
+ * Whether a font is actually installed.
+ *
+ * Measures a string in the candidate against three different generic
+ * fallbacks. ⚠️ Comparing against ONE generic is the usual version of this
+ * trick and it is wrong: if the candidate IS that generic's resolved font —
+ * Menlo on a Mac, say — the widths match and the font is reported missing.
+ * A font only counts as absent when it measures identically to all three.
+ */
+function installed(family: string, canvas: CanvasRenderingContext2D): boolean {
+  const sample = "mmmmmmmmmmlli╔═╗█▒ WiI1l0O";
+  const size = "72px";
+  return ["monospace", "serif", "sans-serif"].some((generic) => {
+    canvas.font = `${size} ${generic}`;
+    const base = canvas.measureText(sample).width;
+    canvas.font = `${size} "${family}", ${generic}`;
+    return canvas.measureText(sample).width !== base;
+  });
+}
+
+/** The candidates this machine actually has, in the order listed. */
+export function availableFonts(): string[] {
+  try {
+    const context = document.createElement("canvas").getContext("2d");
+    if (!context) return [];
+    return FONT_CANDIDATES.filter((family) => installed(family, context));
+  } catch {
+    // Measuring is a nicety; the free-text box still works without it.
+    return [];
+  }
+}
+
+export function currentFont(): string {
+  try {
+    return localStorage.getItem(FONT_KEY) ?? SYSTEM_FONT;
+  } catch {
+    return SYSTEM_FONT;
+  }
+}
+
+export function applyFont(family: string): string {
+  const chosen = family.trim();
+  const root = document.documentElement;
+  if (chosen === SYSTEM_FONT) {
+    // Back to the stack declared in styles.css.
+    root.style.removeProperty("--mono");
+  } else {
+    // The generics stay on the end: an uninstalled font must fall back to a
+    // monospace, not to whatever the UI font is — proportional text in an
+    // editor turns ANSI art into noise.
+    root.style.setProperty(
+      "--mono",
+      `"${chosen.replace(/"/g, "")}", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`,
+    );
+  }
+  try {
+    localStorage.setItem(FONT_KEY, chosen);
+  } catch {
+    // Not worth telling anyone about: it still applies for this run.
+  }
+  return chosen;
+}

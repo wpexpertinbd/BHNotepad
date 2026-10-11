@@ -10,6 +10,7 @@
 //! with unsaved text loses nothing and asks nothing.** Text is written through
 //! to disk as it is typed, so quitting is never a decision point.
 
+pub mod encoding;
 pub mod language;
 pub mod session;
 pub mod settings;
@@ -335,6 +336,7 @@ impl Workspace {
         let mut buffer = Buffer::for_path(&id, &path_string);
         buffer.eol = decoded.eol.to_string();
         buffer.lossy = decoded.lossy;
+        buffer.encoding = decoded.encoding.to_string();
         buffer.window = window.to_string();
         self.session.buffers.push(buffer);
         self.focus(window, &id);
@@ -635,16 +637,37 @@ impl Workspace {
         // so without this a one-word change to a Windows file rewrites every
         // line in it.
         let on_disk = store::encode_eol(&text, &eol);
+
+        // And the file's own ENCODING. Writing a CP437 file back as UTF-8
+        // would turn every box-drawing character into bytes no DOS-era viewer
+        // can read — the file would look fine here and be ruined everywhere
+        // else. A character the code page cannot hold stops the save with the
+        // character named, rather than quietly becoming a `?`.
+        let charset = buffer
+            .as_ref()
+            .map(|b| b.encoding.clone())
+            .unwrap_or_else(|| encoding::UTF8.to_string());
+        let bytes = encoding::encode(&on_disk, &charset).map_err(|ch| StoreError::Io {
+            context: format!(
+                "{} cannot hold the character {ch:?}, so saving would change it — \
+                 use Save As and pick UTF-8 to keep it",
+                encoding::label(&charset)
+            ),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, "unencodable character"),
+        })?;
         // The user's own file gets the same atomic treatment as the store: an
         // interrupted save must not truncate a file they already had.
         let target_path = Path::new(&target);
-        write_user_file(target_path, on_disk.as_bytes())?;
+        write_user_file(target_path, &bytes)?;
 
         if let Some(buffer) = self.session.buffer_mut(id) {
             buffer.path = Some(target.clone());
             buffer.title = language::base_name(&target).to_string();
             buffer.language = language::detect(&target).to_string();
             buffer.dirty = false;
+            // It was just written in `charset`, so that is now what is on disk
+            // — including for a brand new Save As of a scratch tab.
+            buffer.encoding = charset;
         }
         self.session.remember_recent(&target);
         self.persist()?;
@@ -727,6 +750,36 @@ impl Workspace {
         Ok(Some(closed.id))
     }
 
+    /// Re-reads a file in a different encoding, discarding unsaved edits.
+    ///
+    /// For when the guess was wrong — a Windows-1252 text file full of
+    /// accented letters can look enough like CP437 to be taken for art, and
+    /// the only person who can settle it is the one reading it.
+    pub fn reopen_with_encoding(&mut self, id: &str, charset: &str) -> Result<String, StoreError> {
+        let Some(path) = self.session.buffer(id).and_then(|b| b.path.clone()) else {
+            return Err(StoreError::Io {
+                context: "that tab has no file to re-read".to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "no path"),
+            });
+        };
+        let bytes = read_capped(Path::new(&path), self.settings.max_open_bytes)?;
+        let decoded = store::decode_file_as(bytes, Some(charset));
+        let text = decoded.text;
+
+        if let Some(buffer) = self.session.buffer_mut(id) {
+            buffer.eol = decoded.eol.to_string();
+            buffer.lossy = decoded.lossy;
+            buffer.encoding = decoded.encoding.to_string();
+            // The tab now matches the file again, so the snapshot that held
+            // the old reading has to go — leaving it would make `contents`
+            // keep serving text decoded the wrong way.
+            buffer.dirty = false;
+        }
+        self.store.delete_buffer(id)?;
+        self.persist()?;
+        Ok(text)
+    }
+
     /// Discards the closed-tab history and every snapshot it holds.
     pub fn forget_closed_history(&mut self) -> Result<usize, StoreError> {
         let count = self.session.closed.len();
@@ -754,6 +807,7 @@ impl Workspace {
             buffer.dirty = false;
             buffer.eol = decoded.eol.to_string();
             buffer.lossy = decoded.lossy;
+            buffer.encoding = decoded.encoding.to_string();
         }
         self.persist()?;
         Ok(decoded.text)
@@ -2094,30 +2148,92 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_could_not_be_decoded_is_not_overwritten() {
+    fn a_file_that_is_not_utf8_now_round_trips_byte_for_byte() {
+        // ⚠️ INVERTED, not deleted. This test used to assert that such a file
+        // was read lossily and that saving over it was REFUSED, which was the
+        // right answer when UTF-8 was the only encoding we had. It is now read
+        // properly as a code page and written back unchanged, which is the
+        // promise worth protecting instead.
         let (dir, mut workspace) = workspace();
         let file = dir.path().join("latin1.txt");
-        // 0xFF is not valid UTF-8; decoding replaces it and the byte is lost.
-        fs::write(&file, b"caf\xE9 nota\xFFion").unwrap();
+        let original = b"caf\xE9 nota\xFFion";
+        fs::write(&file, original).unwrap();
 
-        let (id, _) = workspace.open_path(MAIN, &file).unwrap();
-        assert!(workspace.session().buffer(&id).unwrap().lossy);
-
-        let error = workspace.save(&id, None).unwrap_err().to_string();
+        let (id, text) = workspace.open_path(MAIN, &file).unwrap();
+        let buffer = workspace.session().buffer(&id).unwrap().clone();
+        assert!(!buffer.lossy, "nothing had to be replaced");
+        assert_eq!(buffer.encoding, encoding::WINDOWS_1252);
         assert!(
-            error.contains("Save As"),
-            "the message should say what to do: {error}"
+            text.contains('é'),
+            "the accented letter is readable: {text:?}"
         );
+
+        workspace.save(&id, None).unwrap();
         assert_eq!(
             fs::read(&file).unwrap(),
-            b"caf\xE9 nota\xFFion",
-            "the original bytes must be untouched"
+            original,
+            "an untouched file must come back byte for byte"
         );
+    }
 
-        // Save As elsewhere is allowed — that is how the user rescues it.
-        let copy = dir.path().join("rescued.txt");
-        assert!(workspace.save(&id, Some(&copy.to_string_lossy())).is_ok());
-        assert!(copy.exists());
+    #[test]
+    fn an_nfo_opens_as_box_drawing_and_saves_back_as_cp437() {
+        // The actual request in issue #1: ANSI art, which is CP437 bytes.
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("scene.nfo");
+        let original: &[u8] = &[0xC9, 0xCD, 0xCD, 0xBB, b'\n', 0xBA, 0xDB, 0xB1, 0xBA];
+        fs::write(&file, original).unwrap();
+
+        let (id, text) = workspace.open_path(MAIN, &file).unwrap();
+        assert_eq!(
+            workspace.session().buffer(&id).unwrap().encoding,
+            encoding::CP437
+        );
+        assert_eq!(text, "╔══╗\n║█▒║");
+        assert!(!text.contains('\u{FFFD}'), "no replacement characters");
+
+        workspace.save(&id, None).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), original, "still a CP437 file");
+    }
+
+    #[test]
+    fn forcing_the_wrong_encoding_is_reversible() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("art.nfo");
+        fs::write(&file, [0xC9, 0xCD, 0xBB]).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &file).unwrap();
+
+        // Insist it is UTF-8, which it is not: now it IS lossy, and saving
+        // over it has to be refused again — that guard still earns its place.
+        let text = workspace.reopen_with_encoding(&id, encoding::UTF8).unwrap();
+        assert!(text.contains('\u{FFFD}'));
+        assert!(workspace.session().buffer(&id).unwrap().lossy);
+        let error = workspace.save(&id, None).unwrap_err().to_string();
+        assert!(error.contains("Save As"), "say what to do: {error}");
+
+        // And back again, with the art intact.
+        let text = workspace
+            .reopen_with_encoding(&id, encoding::CP437)
+            .unwrap();
+        assert_eq!(text, "╔═╗");
+        assert!(!workspace.session().buffer(&id).unwrap().lossy);
+    }
+
+    #[test]
+    fn a_character_a_code_page_cannot_hold_stops_the_save_and_names_it() {
+        let (dir, mut workspace) = workspace();
+        let file = dir.path().join("art.nfo");
+        fs::write(&file, [0xC9, 0xCD, 0xBB]).unwrap();
+        let (id, text) = workspace.open_path(MAIN, &file).unwrap();
+
+        workspace.update_text(&id, &format!("{text} 😀")).unwrap();
+        let error = workspace.save(&id, None).unwrap_err().to_string();
+        assert!(error.contains('😀'), "name the character: {error}");
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            [0xC9, 0xCD, 0xBB],
+            "a refused save must not have touched the file"
+        );
     }
 
     #[test]

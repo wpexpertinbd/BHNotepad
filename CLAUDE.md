@@ -888,3 +888,59 @@ fails the build on it, and runs in CI.
 ⚠️ **Its first version was vacuous**: it skipped any line containing `=>` (meaning to ignore JSX
 props), which also skipped every real `useCallback(() => …)`. It passed against deliberately broken
 code. Anchoring the pattern to the start of a statement is what separates a hook call from a prop.
+
+---
+
+## 🔤 Fonts and encodings — issue #1 (2026-10-12)
+
+`raselrahmanrocky` opened the project's **first outside issue**: *"Please add custom font select
+option … custom font preview to see ansi charecter."*
+
+⚠️ **The font was never the problem, and shipping only a font picker would have closed the issue
+without fixing anything.** An NFO or ANSI-art file is **CP437 bytes**, which are not valid UTF-8,
+so every box-drawing character had already become U+FFFD before any font saw it. Measured before
+building anything:
+
+```
+╔══════╗ as CP437 = c9 cd cd cd cd cd cd bb   →  not valid UTF-8
+BHNotepad showed:  '������ͻ'
+```
+
+So this shipped both halves.
+
+### Encodings (`crates/bhn-core/src/encoding.rs`)
+- **UTF-8, CP437, Windows-1252.** Single-byte code pages, so a decode is a table lookup.
+- ⚠️ **The tables were GENERATED from Python's own `cp437` and `cp1252` codecs**, not typed from
+  memory, and `every_byte_survives_a_round_trip` checks all 256 values of each. Proved
+  non-vacuous by duplicating one glyph in one table: both that test and the ANSI-art test fail.
+  A single wrong entry would silently corrupt a file on save and nothing else would notice.
+- `sniff()` runs **only after UTF-8 has already failed** and answers one narrow question: DOS-era
+  art or Western European text? It counts bytes in 0xB0–0xDF, where CP437 keeps its box and block
+  drawing. It must not grow into a general charset detector.
+- **Saving re-encodes to the file's own encoding.** A CP437 file written back as UTF-8 looks fine
+  here and is ruined everywhere else. A character the code page cannot hold **stops the save and
+  names the character** rather than writing a `?`.
+- **`File → Reopen with Encoding`** for when the guess is wrong, and the status bar now shows the
+  real encoding instead of always saying "UTF-8".
+- ⚠️ The old test `a_file_that_could_not_be_decoded_is_not_overwritten` was **inverted, not
+  deleted**: such a file now round-trips byte for byte, which is the better promise. The
+  refuse-to-save guard still has a test — it is now reachable only by *forcing* UTF-8 on a file
+  that is not UTF-8, which Reopen with Encoding allows.
+
+### The font picker (`app/src/FontDialog.tsx`)
+`--mono` was already the single place the family is decided, so the dialog just sets it.
+- ⚠️ **A webview cannot enumerate installed fonts** — `queryLocalFonts()` is Chromium-only and
+  WebKit has nothing. So a curated candidate list is **probed by measuring**, and a free-text box
+  accepts anything else.
+- ⚠️ **Probe against THREE generics, not one.** The usual trick compares the candidate against
+  `monospace` alone, which reports a font missing when it *is* that generic's resolved font.
+  Measured on this Mac: the one-generic version misses **Menlo**, because Menlo is macOS's
+  default monospace. Three generics find Menlo, Monaco, Andale Mono, PT Mono and Courier New.
+- The preview is the point, not decoration — the request was to *see* whether a font renders ANSI
+  art — and it carries a note saying that remaining `` is an encoding problem, not a font one.
+
+### Verified in a real build
+Opened a genuine CP437 `.nfo`: the art renders, status bar reads **CP437**. Typed `±ü`, saved
+through the File menu, and the file gained exactly **`20 f1 81`** — single CP437 bytes, not the
+four UTF-8 bytes that would have corrupted it — with every original byte untouched. Font set to
+Courier New from the dialog, and both the font and the encoding survived a quit and relaunch.
