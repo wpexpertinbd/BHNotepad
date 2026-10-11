@@ -660,3 +660,19 @@ platform on purpose: a Windows-only test would not protect this from an edit mad
 ⚠️ **Migration wrinkle to warn users about:** anyone who installed the old per-machine MSI will
 get the per-user NSIS install at the next update, leaving **two** copies. Uninstall the old one
 from Add/Remove Programs first.
+
+### ⚠️ A broken Windows uninstall entry is repaired by reinstalling
+
+Benjamin had both the MSI and the NSIS build installed. After removing the exe one, Installed apps
+still listed BHNotepad 0.4.2, and choosing Uninstall gave *"Windows cannot find
+`C:\Users\…\AppData\Local\BHNotepad\uninstall.exe`"* — the registry entry outliving the file it
+points at.
+
+⚠️ Note that path is `AppData\Local`, the **NSIS** location, not `Program Files`. I had told him
+the MSI copy would be in `Program Files` and sent him looking in the wrong place; the entry on
+screen was the leftover *exe* registration. Read the path in the error before theorising about
+which installer it came from.
+
+**The fix turned out to need no registry editing at all: reinstalling the current version puts
+`uninstall.exe` back, and the stale entry becomes valid again.** Tell users that first; deleting
+`HKCU\…\Uninstall\…` keys is the fallback, not the opening move. Now in the README.
