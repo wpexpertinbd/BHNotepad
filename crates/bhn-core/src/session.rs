@@ -58,6 +58,72 @@ pub struct Buffer {
     /// not understood, so it is refused; Save As is still allowed.
     #[serde(default)]
     pub lossy: bool,
+    /// Which window this tab lives in — a [`WindowRecord::id`].
+    ///
+    /// Defaults to [`MAIN_WINDOW`], so every session written before windows
+    /// existed loads with all of its tabs in the one window, which is exactly
+    /// where they were.
+    #[serde(default = "default_window")]
+    pub window: String,
+}
+
+/// The first window's id. It always exists: tabs belonging to a window that
+/// has gone are brought here rather than being lost.
+pub const MAIN_WINDOW: &str = "main";
+
+fn default_window() -> String {
+    MAIN_WINDOW.to_string()
+}
+
+/// One editor window, so a second window can live on a second monitor and be
+/// found there again next launch.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WindowRecord {
+    /// Also the Tauri window label, so it must be a valid one: see
+    /// [`is_safe_window_id`].
+    pub id: String,
+    /// The id of the tab in front in this window. `None` until it has one.
+    #[serde(default)]
+    pub active: Option<String>,
+    /// Screen position and size in LOGICAL units, remembered so the window
+    /// reopens where it was left — including on a second monitor.
+    ///
+    /// ⚠️ Logical, not physical pixels. The shell reads the platform's
+    /// physical values and divides by the display's scale factor before
+    /// storing them here; storing physical ones made a window on a Retina
+    /// screen double its position and size on every quit.
+    ///
+    /// ⚠️ These are SCREEN coordinates, and the monitor they refer to may not
+    /// be connected next time. The shell clamps them to a visible display
+    /// before using them; a window restored to a monitor that is gone is a
+    /// window the user cannot see or reach.
+    #[serde(default)]
+    pub x: Option<i32>,
+    #[serde(default)]
+    pub y: Option<i32>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+impl WindowRecord {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            active: None,
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+        }
+    }
+}
+
+/// A window id becomes a Tauri window label and is compared against stored
+/// ids, so it is held to the same shape as a buffer id.
+pub fn is_safe_window_id(id: &str) -> bool {
+    is_safe_id(id)
 }
 
 /// Line endings default to LF: it is what a new scratch note should have on
@@ -84,6 +150,7 @@ impl Buffer {
             word_wrap: false,
             eol: default_eol(),
             lossy: false,
+            window: default_window(),
         }
     }
 
@@ -101,6 +168,7 @@ impl Buffer {
             word_wrap: false,
             eol: default_eol(),
             lossy: false,
+            window: default_window(),
         }
     }
 
@@ -148,7 +216,14 @@ pub struct Session {
     pub version: u32,
     #[serde(default)]
     pub buffers: Vec<Buffer>,
-    /// Index into `buffers`. Always valid after [`Session::normalize`].
+    /// Legacy: index into `buffers` of the main window's active tab.
+    ///
+    /// ⚠️ Kept because a session written before windows existed carries the
+    /// focused tab HERE and nowhere else — that is the input the migration in
+    /// [`Session::normalize_windows`] reads. It is now derived, never the
+    /// source of truth: ask [`WindowRecord::active`] which tab a window is
+    /// showing. It is still written so that installing an older build does not
+    /// lose which tab was in front.
     #[serde(default)]
     pub active: usize,
     /// Files opened or saved recently, newest first.
@@ -157,6 +232,10 @@ pub struct Session {
     /// Tabs that were closed, newest first, for Restore Recent Closed File.
     #[serde(default)]
     pub closed: Vec<ClosedTab>,
+    /// Every open window. [`Session::normalize`] guarantees at least one, and
+    /// that every buffer's `window` names one of these.
+    #[serde(default)]
+    pub windows: Vec<WindowRecord>,
 }
 
 fn default_version() -> u32 {
@@ -171,6 +250,7 @@ impl Default for Session {
             active: 0,
             recent: Vec::new(),
             closed: Vec::new(),
+            windows: vec![WindowRecord::new(MAIN_WINDOW)],
         }
     }
 }
@@ -211,6 +291,8 @@ impl Session {
             }
         }
 
+        self.normalize_windows(active_id.clone());
+
         // Keep whichever tab was in front rather than resetting to the first,
         // even if earlier tabs were dropped.
         self.active = active_id
@@ -223,6 +305,107 @@ impl Session {
         self.closed.retain(|c| is_safe_id(&c.id));
         self.recent.truncate(RECENT_FILES);
         self.version = SESSION_VERSION;
+        self.sync_legacy_active();
+    }
+
+    /// Recomputes the legacy `active` index from the main window.
+    ///
+    /// Derived, so that a session saved now and read by a build that predates
+    /// windows still opens on the right tab instead of always on the first.
+    pub fn sync_legacy_active(&mut self) {
+        self.active = self
+            .window(MAIN_WINDOW)
+            .and_then(|w| w.active.clone())
+            .and_then(|id| self.buffers.iter().position(|b| b.id == id))
+            .unwrap_or(0);
+    }
+
+    /// Makes the window list consistent with the buffers, and migrates a
+    /// session written before windows existed.
+    ///
+    /// `legacy_active` is the id of the tab the old single-window `active`
+    /// index pointed at, which becomes the main window's active tab.
+    fn normalize_windows(&mut self, legacy_active: Option<String>) {
+        // Drop malformed and duplicate window ids.
+        let mut seen: Vec<String> = Vec::new();
+        self.windows.retain(|w| {
+            if !is_safe_window_id(&w.id) || seen.contains(&w.id) {
+                return false;
+            }
+            seen.push(w.id.clone());
+            true
+        });
+
+        // ⚠️ The main window is not optional. Every tab has to have somewhere
+        // to be, and a session whose only window record was dropped would
+        // otherwise leave every buffer homeless.
+        if !self.windows.iter().any(|w| w.id == MAIN_WINDOW) {
+            self.windows.insert(0, WindowRecord::new(MAIN_WINDOW));
+        }
+
+        // A tab pointing at a window that is not there comes to the main
+        // window rather than disappearing from every view of the session.
+        let known: Vec<String> = self.windows.iter().map(|w| w.id.clone()).collect();
+        for buffer in &mut self.buffers {
+            if !known.contains(&buffer.window) {
+                buffer.window = MAIN_WINDOW.to_string();
+            }
+        }
+
+        // A session from before windows existed: one window, holding
+        // everything, focused where it was.
+        let migrating = self.windows.len() == 1 && self.windows[0].active.is_none();
+        if migrating {
+            if let Some(id) = legacy_active {
+                if self.buffers.iter().any(|b| b.id == id) {
+                    self.windows[0].active = Some(id);
+                }
+            }
+        }
+
+        // Every window's active tab must be one of its own.
+        for window in &mut self.windows {
+            let valid = window.active.as_ref().is_some_and(|id| {
+                self.buffers
+                    .iter()
+                    .any(|b| b.id == *id && b.window == window.id)
+            });
+            if !valid {
+                window.active = self
+                    .buffers
+                    .iter()
+                    .filter(|b| b.window == window.id)
+                    .map(|b| b.id.clone())
+                    .next_back();
+            }
+        }
+    }
+
+    /// This window's tabs, in tab-bar order.
+    pub fn buffers_in(&self, window: &str) -> Vec<&Buffer> {
+        self.buffers.iter().filter(|b| b.window == window).collect()
+    }
+
+    /// Where a tab sits within its own window's strip, not in the whole session.
+    pub fn index_in_window(&self, window: &str, id: &str) -> Option<usize> {
+        self.buffers_in(window).iter().position(|b| b.id == id)
+    }
+
+    pub fn window(&self, id: &str) -> Option<&WindowRecord> {
+        self.windows.iter().find(|w| w.id == id)
+    }
+
+    pub fn window_mut(&mut self, id: &str) -> Option<&mut WindowRecord> {
+        self.windows.iter_mut().find(|w| w.id == id)
+    }
+
+    /// Adds a window record if it is not already there. Returns whether it was.
+    pub fn ensure_window(&mut self, id: &str) -> bool {
+        if !is_safe_window_id(id) || self.window(id).is_some() {
+            return false;
+        }
+        self.windows.push(WindowRecord::new(id));
+        true
     }
 
     /// Records a file as recently used, newest first and without duplicates.
@@ -413,6 +596,94 @@ mod tests {
         let text = serde_json::to_string(&s).unwrap();
         let back: Session = serde_json::from_str(&text).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn a_session_from_before_windows_existed_keeps_every_tab_and_its_focus() {
+        // Exactly what v0.4.8 and earlier wrote: no `windows`, no `window`.
+        //
+        // ⚠️ `active` is deliberately NOT the last tab. With it on the last
+        // one this test passed even with the migration removed, because the
+        // fallback picks a window's last tab anyway — a green test proving
+        // nothing. Three tabs focused on the first can only pass if the old
+        // index was really carried across.
+        let mut back: Session = serde_json::from_str(
+            r#"{"buffers":[{"id":"a","title":"new 1"},{"id":"b","title":"new 2"},
+                           {"id":"c","title":"new 3"}],"active":0}"#,
+        )
+        .unwrap();
+        back.normalize();
+        assert_eq!(back.windows.len(), 1, "one window, as there always was");
+        assert_eq!(back.windows[0].id, MAIN_WINDOW);
+        assert_eq!(back.buffers.len(), 3, "every tab must survive the upgrade");
+        assert!(back.buffers.iter().all(|b| b.window == MAIN_WINDOW));
+        assert_eq!(
+            back.windows[0].active.as_deref(),
+            Some("a"),
+            "the tab that was in front must still be in front"
+        );
+    }
+
+    #[test]
+    fn a_tab_whose_window_is_gone_comes_to_the_main_window() {
+        let mut s = Session::default();
+        s.buffers.push(Buffer {
+            window: "vanished".into(),
+            ..scratch("a", "new 1")
+        });
+        s.normalize();
+        assert_eq!(s.buffers[0].window, MAIN_WINDOW);
+        assert_eq!(s.buffers_in(MAIN_WINDOW).len(), 1);
+    }
+
+    #[test]
+    fn the_main_window_record_cannot_be_removed() {
+        let mut s = Session {
+            windows: vec![WindowRecord::new("second")],
+            ..Default::default()
+        };
+        s.normalize();
+        assert!(s.window(MAIN_WINDOW).is_some());
+    }
+
+    #[test]
+    fn each_window_keeps_its_own_active_tab() {
+        let mut s = Session::default();
+        s.ensure_window("second");
+        s.buffers.push(scratch("a", "new 1"));
+        s.buffers.push(Buffer {
+            window: "second".into(),
+            ..scratch("b", "new 2")
+        });
+        s.buffers.push(Buffer {
+            window: "second".into(),
+            ..scratch("c", "new 3")
+        });
+        s.window_mut("second").unwrap().active = Some("b".into());
+        s.normalize();
+        assert_eq!(s.window(MAIN_WINDOW).unwrap().active.as_deref(), Some("a"));
+        assert_eq!(s.window("second").unwrap().active.as_deref(), Some("b"));
+        assert_eq!(s.index_in_window("second", "c"), Some(1));
+    }
+
+    #[test]
+    fn a_window_cannot_point_at_another_windows_tab() {
+        let mut s = Session::default();
+        s.ensure_window("second");
+        s.buffers.push(scratch("a", "new 1"));
+        // "a" lives in the main window, so "second" must not claim it.
+        s.window_mut("second").unwrap().active = Some("a".into());
+        s.normalize();
+        assert_eq!(s.window("second").unwrap().active, None);
+    }
+
+    #[test]
+    fn an_unsafe_window_id_is_rejected() {
+        let mut s = Session::default();
+        assert!(!s.ensure_window("../escape"));
+        assert!(!s.ensure_window(""));
+        assert!(s.ensure_window("w_2"));
+        assert!(!s.ensure_window("w_2"), "already there");
     }
 
     #[test]

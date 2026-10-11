@@ -17,7 +17,7 @@ pub mod store;
 pub mod update;
 
 pub use language::detect as detect_language;
-pub use session::{Buffer, ClosedTab, Session, SESSION_VERSION};
+pub use session::{Buffer, ClosedTab, Session, WindowRecord, MAIN_WINDOW, SESSION_VERSION};
 pub use settings::Settings;
 pub use store::{new_id, Store, StoreError};
 
@@ -99,14 +99,27 @@ impl Workspace {
             )),
         };
 
-        if workspace.ensure_not_empty() {
-            // A brand new tab exists only in memory until this runs. Writing it
-            // now means even a force-kill before the first keystroke still
-            // leaves a session to restore, rather than a store with no record
-            // of the tab the user is looking at.
-            workspace
-                .store
-                .write_buffer(&workspace.session.buffers[0].id, "")?;
+        // Every window needs a tab, not just the first one: a restored second
+        // window whose tabs were all closed would otherwise open with an empty
+        // strip and nowhere to type.
+        let windows: Vec<String> = workspace
+            .session
+            .windows
+            .iter()
+            .map(|w| w.id.clone())
+            .collect();
+        let mut created = false;
+        for window in windows {
+            if let Some(id) = workspace.ensure_not_empty_in(&window) {
+                // A brand new tab exists only in memory until this runs. Writing
+                // it now means even a force-kill before the first keystroke still
+                // leaves a session to restore, rather than a store with no record
+                // of the tab the user is looking at.
+                workspace.store.write_buffer(&id, "")?;
+                created = true;
+            }
+        }
+        if created {
             workspace.persist()?;
         }
         Ok((workspace, note))
@@ -211,14 +224,32 @@ impl Workspace {
     ///
     /// Returns whether a tab had to be created, so the caller knows there is
     /// something new to write to disk.
-    fn ensure_not_empty(&mut self) -> bool {
-        if !self.session.buffers.is_empty() {
-            return false;
+    /// Makes sure a window still has somewhere to type. Returns the id of the
+    /// tab it had to create, if any.
+    ///
+    /// Every window gets this, not just the first: an empty second window with
+    /// no tab strip and nowhere to type is a window with nothing in it but a
+    /// title bar.
+    fn ensure_not_empty_in(&mut self, window: &str) -> Option<String> {
+        if !self.session.buffers_in(window).is_empty() {
+            return None;
         }
         let title = self.session.next_untitled_title();
-        self.session.buffers.push(Buffer::untitled(new_id(), title));
-        self.session.active = 0;
-        true
+        let id = new_id();
+        self.session.buffers.push(Buffer {
+            window: window.to_string(),
+            ..Buffer::untitled(&id, title)
+        });
+        self.focus(window, &id);
+        Some(id)
+    }
+
+    /// Points a window at one of its tabs.
+    fn focus(&mut self, window: &str, id: &str) {
+        if let Some(record) = self.session.window_mut(window) {
+            record.active = Some(id.to_string());
+        }
+        self.session.sync_legacy_active();
     }
 
     /// Writes `session.json`. Cheap — call it after anything structural.
@@ -234,12 +265,18 @@ impl Workspace {
         }
     }
 
-    /// Adds an empty scratch tab and focuses it. Returns its id.
-    pub fn new_scratch(&mut self) -> Result<String, StoreError> {
+    /// Adds an empty scratch tab to a window and focuses it. Returns its id.
+    pub fn new_scratch(&mut self, window: &str) -> Result<String, StoreError> {
+        self.session.ensure_window(window);
         let id = new_id();
+        // Titles are numbered across the WHOLE session, not per window, so two
+        // windows never both show a tab called `new 1`.
         let title = self.session.next_untitled_title();
-        self.session.buffers.push(Buffer::untitled(&id, title));
-        self.session.active = self.session.buffers.len() - 1;
+        self.session.buffers.push(Buffer {
+            window: window.to_string(),
+            ..Buffer::untitled(&id, title)
+        });
+        self.focus(window, &id);
         // Create the snapshot immediately so a crash one keystroke later still
         // finds a file to restore.
         self.store.write_buffer(&id, "")?;
@@ -250,7 +287,12 @@ impl Workspace {
     /// Opens a file from disk, or focuses the tab already showing it.
     ///
     /// Returns the tab id and its text.
-    pub fn open_path(&mut self, path: impl AsRef<Path>) -> Result<(String, String), StoreError> {
+    pub fn open_path(
+        &mut self,
+        window: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<(String, String), StoreError> {
+        self.session.ensure_window(window);
         // Resolve before anything else. A path stored as given would mean
         // `notes.txt` reopening against a different directory after a restart
         // and Save overwriting the wrong file, and `/tmp/a.txt` and
@@ -261,7 +303,14 @@ impl Workspace {
         let path_string = path_ref.to_string_lossy().into_owned();
 
         if let Some(index) = self.session.index_of_path(&path_string) {
-            self.session.active = index;
+            // ⚠️ Focus it in WHATEVER window it is already open in, not the one
+            // that asked. Opening a file twice must never make a second tab
+            // with a competing snapshot, and that rule does not stop being
+            // true because the other copy is on the other monitor. The shell
+            // reads the window back from the buffer and raises it.
+            let home = self.session.buffers[index].window.clone();
+            let id = self.session.buffers[index].id.clone();
+            self.focus(&home, &id);
             // Still counts as using the file — without this, re-opening
             // something already on screen left it sinking down the recent list.
             self.session.remember_recent(&path_string);
@@ -286,8 +335,9 @@ impl Workspace {
         let mut buffer = Buffer::for_path(&id, &path_string);
         buffer.eol = decoded.eol.to_string();
         buffer.lossy = decoded.lossy;
+        buffer.window = window.to_string();
         self.session.buffers.push(buffer);
-        self.session.active = self.session.buffers.len() - 1;
+        self.focus(window, &id);
         self.session.remember_recent(&path_string);
         // Deliberately NO snapshot here. The file on disk is already the copy,
         // so writing one would mean a second 512 MB on open and 512 MB sitting
@@ -351,25 +401,186 @@ impl Workspace {
         }
     }
 
-    pub fn set_active(&mut self, index: usize) {
-        if index < self.session.buffers.len() {
-            self.session.active = index;
+    /// Focuses a tab by its position in ITS OWN window's strip.
+    ///
+    /// Indices here are always window-local: that is what the tab strip on
+    /// screen shows, and a global index would mean the second window's third
+    /// tab selecting something in the first.
+    pub fn set_active(&mut self, window: &str, index: usize) {
+        let Some(id) = self
+            .session
+            .buffers_in(window)
+            .get(index)
+            .map(|b| b.id.clone())
+        else {
+            return;
+        };
+        self.focus(window, &id);
+    }
+
+    /// Moves a tab within its window, for drag-to-reorder. Window-local indices.
+    pub fn reorder(&mut self, window: &str, from: usize, to: usize) {
+        // The positions in the global list that belong to this window. The
+        // other windows' tabs stay exactly where they are; only the contents
+        // of these slots are permuted.
+        let slots: Vec<usize> = self
+            .session
+            .buffers
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.window == window)
+            .map(|(index, _)| index)
+            .collect();
+        if from >= slots.len() || to >= slots.len() || from == to {
+            return;
+        }
+
+        let mut ordered: Vec<Buffer> = slots
+            .iter()
+            .map(|&slot| self.session.buffers[slot].clone())
+            .collect();
+        let moved = ordered.remove(from);
+        ordered.insert(to, moved);
+        for (slot, buffer) in slots.into_iter().zip(ordered) {
+            self.session.buffers[slot] = buffer;
+        }
+        // The window remembers its active tab by ID, so it follows the move on
+        // its own; only the derived legacy index needs recomputing.
+        self.session.sync_legacy_active();
+    }
+
+    /// Moves a tab into another window, which is the whole point of step one:
+    /// a tab can be sent to a window sitting on another monitor.
+    ///
+    /// Creates the window record if it is not there yet. Returns the window
+    /// the tab came FROM, which the shell needs so it can refresh that window
+    /// too — the tab has to disappear from the strip it left.
+    pub fn move_to_window(&mut self, id: &str, target: &str) -> Result<String, StoreError> {
+        if !session::is_safe_window_id(target) {
+            return Err(StoreError::Io {
+                context: format!("{target} is not a usable window id"),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad window id"),
+            });
+        }
+        let Some(buffer) = self.session.buffer(id) else {
+            return Ok(String::new());
+        };
+        let from = buffer.window.clone();
+        if from == target {
+            return Ok(from);
+        }
+        self.session.ensure_window(target);
+
+        // Move it to the END of the target window's strip, where a tab the
+        // user just sent somewhere is expected to appear.
+        let index = self.session.index_of(id).expect("just looked it up");
+        let mut moved = self.session.buffers.remove(index);
+        moved.window = target.to_string();
+        self.session.buffers.push(moved);
+        self.focus(target, id);
+
+        // The window it left needs a new front tab, and must not be left with
+        // an empty strip and nowhere to type.
+        self.repoint_after_removal(&from, id);
+        if let Some(fresh) = self.ensure_not_empty_in(&from) {
+            self.store.write_buffer(&fresh, "")?;
+        }
+        self.persist()?;
+        Ok(from)
+    }
+
+    /// Picks a new front tab for a window after `gone` left it.
+    fn repoint_after_removal(&mut self, window: &str, gone: &str) {
+        let still_valid = self
+            .session
+            .window(window)
+            .and_then(|w| w.active.clone())
+            .is_some_and(|active| active != gone);
+        if still_valid {
+            return;
+        }
+        let next = self.session.buffers_in(window).last().map(|b| b.id.clone());
+        if let Some(record) = self.session.window_mut(window) {
+            record.active = next;
+        }
+        self.session.sync_legacy_active();
+    }
+
+    /// Every window, for the shell to recreate at startup.
+    pub fn windows(&self) -> &[session::WindowRecord] {
+        &self.session.windows
+    }
+
+    /// Remembers where a window is, so it reopens on the same monitor.
+    pub fn set_window_geometry(&mut self, window: &str, x: i32, y: i32, width: u32, height: u32) {
+        if let Some(record) = self.session.window_mut(window) {
+            record.x = Some(x);
+            record.y = Some(y);
+            record.width = Some(width);
+            record.height = Some(height);
         }
     }
 
-    /// Moves a tab, for drag-to-reorder.
-    pub fn reorder(&mut self, from: usize, to: usize) {
-        let len = self.session.buffers.len();
-        if from >= len || to >= len || from == to {
-            return;
+    /// Creates a window record and returns its id.
+    pub fn open_window(&mut self) -> Result<String, StoreError> {
+        let id = new_id();
+        self.open_window_named(&id)?;
+        Ok(id)
+    }
+
+    /// Records a window the shell already has, by its own label.
+    ///
+    /// The shell's window labels and these ids are the same namespace, so a
+    /// window created outside the core — the one the app starts with, or one
+    /// restored by the platform — can introduce itself here.
+    pub fn open_window_named(&mut self, id: &str) -> Result<bool, StoreError> {
+        let added = self.session.ensure_window(id);
+        if added {
+            self.persist()?;
         }
-        let active_id = self.session.buffers[self.session.active].id.clone();
-        let buffer = self.session.buffers.remove(from);
-        self.session.buffers.insert(to, buffer);
-        // Follow the tab the user was on, not its old index.
-        if let Some(index) = self.session.index_of(&active_id) {
-            self.session.active = index;
+        Ok(added)
+    }
+
+    /// Takes a window out of the session, moving its tabs somewhere they can
+    /// still be reached.
+    ///
+    /// ⚠️ The tabs are MOVED, not closed. This app exists so that a scratch
+    /// note is never lost without being asked about, and closing a window is
+    /// not an answer to that question — someone who meant to discard those
+    /// notes has Close All, which asks. Returns how many tabs moved and where.
+    ///
+    /// Closing the LAST window is a no-op on the session: that is the app
+    /// quitting, and everything must come back next launch exactly as it is.
+    pub fn close_window(&mut self, window: &str) -> Result<(usize, String), StoreError> {
+        if self.session.windows.len() <= 1 || self.session.window(window).is_none() {
+            return Ok((0, String::new()));
         }
+        let destination = self
+            .session
+            .windows
+            .iter()
+            .map(|w| w.id.clone())
+            .find(|id| id != window && id == session::MAIN_WINDOW)
+            .or_else(|| {
+                self.session
+                    .windows
+                    .iter()
+                    .map(|w| w.id.clone())
+                    .find(|id| id != window)
+            })
+            .expect("more than one window");
+
+        let mut moved = 0;
+        for buffer in &mut self.session.buffers {
+            if buffer.window == window {
+                buffer.window = destination.clone();
+                moved += 1;
+            }
+        }
+        self.session.windows.retain(|w| w.id != window);
+        self.session.sync_legacy_active();
+        self.persist()?;
+        Ok((moved, destination))
     }
 
     /// Writes a tab to a real file and clears its dirty flag.
@@ -447,8 +658,15 @@ impl Workspace {
     /// gone afterwards. The shell is expected to ask once before calling it —
     /// that single confirmation is the exception to the app's no-prompt rule,
     /// not a softening of it.
-    pub fn close_all(&mut self) -> Result<usize, StoreError> {
-        let ids: Vec<String> = self.session.buffers.iter().map(|b| b.id.clone()).collect();
+    pub fn close_all(&mut self, window: &str) -> Result<usize, StoreError> {
+        // One window's tabs only. Close All in the window on the second
+        // monitor must not reach across and empty the one on the first.
+        let ids: Vec<String> = self
+            .session
+            .buffers_in(window)
+            .iter()
+            .map(|b| b.id.clone())
+            .collect();
         // Through `close`, so every tab lands in the closed history and Close
         // All is recoverable one tab at a time rather than being final. The
         // confirmation is about clearing the board, not about destroying the
@@ -461,10 +679,10 @@ impl Workspace {
     ///
     /// Save All walks these one at a time asking where each should go; tabs
     /// that already have a path are written without asking.
-    pub fn unsaved_tabs(&self) -> Vec<Buffer> {
+    pub fn unsaved_tabs(&self, window: &str) -> Vec<Buffer> {
         self.session
-            .buffers
-            .iter()
+            .buffers_in(window)
+            .into_iter()
             .filter(|b| b.is_scratch())
             .cloned()
             .collect()
@@ -473,7 +691,8 @@ impl Workspace {
     /// Reopens the most recently closed tab, text and all.
     ///
     /// Returns its id, or `None` when nothing has been closed.
-    pub fn restore_last_closed(&mut self) -> Result<Option<String>, StoreError> {
+    pub fn restore_last_closed(&mut self, window: &str) -> Result<Option<String>, StoreError> {
+        self.session.ensure_window(window);
         let Some(closed) = self.session.closed.first().cloned() else {
             return Ok(None);
         };
@@ -501,8 +720,9 @@ impl Workspace {
             buffer.title = self.session.next_untitled_title();
         }
 
+        buffer.window = window.to_string();
         self.session.buffers.push(buffer);
-        self.session.active = self.session.buffers.len() - 1;
+        self.focus(window, &closed.id);
         self.persist()?;
         Ok(Some(closed.id))
     }
@@ -584,9 +804,14 @@ impl Workspace {
 
     /// Closes every tab except one. Returns how many were closed.
     pub fn close_others(&mut self, keep: &str) -> Result<usize, StoreError> {
+        // Scoped to the window the kept tab is in — these commands come from
+        // one window's tab strip and mean the tabs on it.
+        let Some(window) = self.session.buffer(keep).map(|b| b.window.clone()) else {
+            return Ok(0);
+        };
         let doomed: Vec<String> = self
             .session
-            .buffers
+            .buffers_in(&window)
             .iter()
             .filter(|b| b.id != keep)
             .map(|b| b.id.clone())
@@ -596,10 +821,13 @@ impl Workspace {
 
     /// Closes every tab to the left of one.
     pub fn close_to_left(&mut self, from: &str) -> Result<usize, StoreError> {
-        let Some(index) = self.session.index_of(from) else {
+        let Some(window) = self.session.buffer(from).map(|b| b.window.clone()) else {
             return Ok(0);
         };
-        let doomed: Vec<String> = self.session.buffers[..index]
+        let Some(index) = self.session.index_in_window(&window, from) else {
+            return Ok(0);
+        };
+        let doomed: Vec<String> = self.session.buffers_in(&window)[..index]
             .iter()
             .map(|b| b.id.clone())
             .collect();
@@ -608,10 +836,13 @@ impl Workspace {
 
     /// Closes every tab to the right of one.
     pub fn close_to_right(&mut self, from: &str) -> Result<usize, StoreError> {
-        let Some(index) = self.session.index_of(from) else {
+        let Some(window) = self.session.buffer(from).map(|b| b.window.clone()) else {
             return Ok(0);
         };
-        let doomed: Vec<String> = self.session.buffers[index + 1..]
+        let Some(index) = self.session.index_in_window(&window, from) else {
+            return Ok(0);
+        };
+        let doomed: Vec<String> = self.session.buffers_in(&window)[index + 1..]
             .iter()
             .map(|b| b.id.clone())
             .collect();
@@ -658,11 +889,9 @@ impl Workspace {
             }
         }
 
-        if self.session.active >= self.session.buffers.len() {
-            self.session.active = self.session.buffers.len().saturating_sub(1);
-        }
-        if self.ensure_not_empty() {
-            let new_tab = self.session.buffers[0].id.clone();
+        let home = buffer.window.clone();
+        self.repoint_after_removal(&home, id);
+        if let Some(new_tab) = self.ensure_not_empty_in(&home) {
             self.store.write_buffer(&new_tab, "")?;
         }
         self.persist()?;
@@ -852,6 +1081,10 @@ fn open_with_permissions(path: &Path, permissions: &fs::Permissions) -> std::io:
 
 #[cfg(test)]
 mod tests {
+    /// Every existing test predates windows, so they all act on the first
+    /// one — which is exactly the behaviour that must not change.
+    const MAIN: &str = session::MAIN_WINDOW;
+
     use super::*;
 
     fn workspace() -> (tempfile::TempDir, Workspace) {
@@ -859,6 +1092,158 @@ mod tests {
         let (workspace, note) = Workspace::open(dir.path()).unwrap();
         assert!(note.is_none());
         (dir, workspace)
+    }
+
+    // ── A second window ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_tab_moved_to_another_window_takes_its_text_with_it() {
+        let (_dir, mut workspace) = workspace();
+        let id = workspace.new_scratch(MAIN).unwrap();
+        workspace.update_text(&id, "the server IP").unwrap();
+
+        let second = workspace.open_window().unwrap();
+        let from = workspace.move_to_window(&id, &second).unwrap();
+
+        assert_eq!(from, MAIN, "the shell has to know which strip lost a tab");
+        assert_eq!(workspace.session().buffer(&id).unwrap().window, second);
+        assert_eq!(workspace.text(&id).unwrap(), "the server IP");
+        assert_eq!(
+            workspace
+                .session()
+                .window(&second)
+                .unwrap()
+                .active
+                .as_deref(),
+            Some(id.as_str()),
+            "a tab sent to a window should be the one showing there"
+        );
+    }
+
+    #[test]
+    fn a_window_whose_last_tab_moved_away_still_has_somewhere_to_type() {
+        let (_dir, mut workspace) = workspace();
+        // The first launch tab is the only one in the main window.
+        let only = workspace.session().buffers_in(MAIN)[0].id.clone();
+        let second = workspace.open_window().unwrap();
+        workspace.move_to_window(&only, &second).unwrap();
+
+        let left_behind = workspace.session().buffers_in(MAIN);
+        assert_eq!(left_behind.len(), 1, "an empty window has nowhere to type");
+        assert_ne!(left_behind[0].id, only);
+        assert!(
+            workspace.store().read_buffer(&left_behind[0].id).is_ok(),
+            "the replacement tab must exist on disk too, not only in memory"
+        );
+    }
+
+    #[test]
+    fn closing_a_window_moves_its_tabs_rather_than_losing_them() {
+        let (_dir, mut workspace) = workspace();
+        let second = workspace.open_window().unwrap();
+        let a = workspace.new_scratch(&second).unwrap();
+        let b = workspace.new_scratch(&second).unwrap();
+        workspace.update_text(&a, "still wanted").unwrap();
+
+        let (moved, destination) = workspace.close_window(&second).unwrap();
+
+        assert_eq!(moved, 2);
+        assert_eq!(destination, MAIN);
+        assert!(workspace.session().window(&second).is_none());
+        // ⭐ The promise: a scratch note is never discarded without being
+        // asked about, and closing a window is not an answer to that question.
+        assert_eq!(workspace.session().buffer(&a).unwrap().window, MAIN);
+        assert_eq!(workspace.session().buffer(&b).unwrap().window, MAIN);
+        assert_eq!(workspace.text(&a).unwrap(), "still wanted");
+    }
+
+    #[test]
+    fn closing_the_last_window_leaves_the_session_untouched() {
+        let (_dir, mut workspace) = workspace();
+        let id = workspace.new_scratch(MAIN).unwrap();
+        workspace.update_text(&id, "quit with this open").unwrap();
+        let before = workspace.session().clone();
+
+        // This is what quitting looks like: the final window going away. It
+        // must not be mistaken for the user dismissing a window.
+        let (moved, _) = workspace.close_window(MAIN).unwrap();
+
+        assert_eq!(moved, 0);
+        assert_eq!(*workspace.session(), before);
+        assert_eq!(workspace.text(&id).unwrap(), "quit with this open");
+    }
+
+    #[test]
+    fn close_all_in_one_window_leaves_the_other_window_alone() {
+        let (_dir, mut workspace) = workspace();
+        let kept = workspace.new_scratch(MAIN).unwrap();
+        let second = workspace.open_window().unwrap();
+        workspace.new_scratch(&second).unwrap();
+        workspace.new_scratch(&second).unwrap();
+
+        let closed = workspace.close_all(&second).unwrap();
+
+        assert_eq!(closed, 2);
+        assert!(
+            workspace.session().buffer(&kept).is_some(),
+            "Close All on one monitor must not empty the window on the other"
+        );
+        assert_eq!(
+            workspace.session().buffers_in(&second).len(),
+            1,
+            "the emptied window gets a fresh tab, like the first one always has"
+        );
+    }
+
+    #[test]
+    fn a_file_already_open_is_focused_where_it_is_not_opened_twice() {
+        let (dir, mut workspace) = workspace();
+        let path = dir.path().join("shared.txt");
+        std::fs::write(&path, "one copy only").unwrap();
+
+        let (id, _) = workspace.open_path(MAIN, &path).unwrap();
+        let second = workspace.open_window().unwrap();
+        let (again, _) = workspace.open_path(&second, &path).unwrap();
+
+        assert_eq!(again, id, "a second tab would mean two competing snapshots");
+        assert_eq!(workspace.session().buffer(&id).unwrap().window, MAIN);
+        assert_eq!(
+            workspace.session().window(MAIN).unwrap().active.as_deref(),
+            Some(id.as_str()),
+            "it is focused in the window that actually holds it"
+        );
+    }
+
+    #[test]
+    fn both_windows_and_their_tabs_come_back_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (second, left, right) = {
+            let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
+            let left = workspace.new_scratch(MAIN).unwrap();
+            workspace.update_text(&left, "monitor one").unwrap();
+            let second = workspace.open_window().unwrap();
+            let right = workspace.new_scratch(&second).unwrap();
+            workspace.update_text(&right, "monitor two").unwrap();
+            workspace.set_window_geometry(&second, 1920, 100, 900, 600);
+            workspace.persist().unwrap();
+            (second, left, right)
+        };
+
+        let (reopened, note) = Workspace::open(dir.path()).unwrap();
+        assert!(note.is_none(), "nothing should need recovering");
+        assert_eq!(reopened.windows().len(), 2);
+        assert_eq!(reopened.session().buffer(&left).unwrap().window, MAIN);
+        assert_eq!(reopened.session().buffer(&right).unwrap().window, second);
+        assert_eq!(reopened.text(&left).unwrap(), "monitor one");
+        assert_eq!(reopened.text(&right).unwrap(), "monitor two");
+
+        let record = reopened.session().window(&second).unwrap();
+        assert_eq!((record.x, record.y), (Some(1920), Some(100)));
+        assert_eq!(
+            (record.width, record.height),
+            (Some(900), Some(600)),
+            "the window has to reopen on the monitor it was left on"
+        );
     }
 
     #[test]
@@ -917,11 +1302,11 @@ mod tests {
             ids.push(first);
 
             for i in 1..10 {
-                let id = workspace.new_scratch().unwrap();
+                let id = workspace.new_scratch(MAIN).unwrap();
                 workspace.update_text(&id, &format!("note {i}")).unwrap();
                 ids.push(id);
             }
-            workspace.set_active(4);
+            workspace.set_active(MAIN, 4);
             workspace.persist().unwrap();
             // Dropped here with no save prompt and no explicit flush: exactly
             // what a quit looks like.
@@ -960,15 +1345,15 @@ mod tests {
             let first = workspace.session().buffers[0].id.clone();
             workspace.update_text(&first, "tab one survived").unwrap();
             for i in 2..=5 {
-                let id = workspace.new_scratch().unwrap();
+                let id = workspace.new_scratch(MAIN).unwrap();
                 workspace
                     .update_text(&id, &format!("tab {i} survived"))
                     .unwrap();
             }
             // A sixth tab, created clean and persisted clean by new_scratch
             // (which also focuses it, hence the set_active afterwards).
-            let fresh = workspace.new_scratch().unwrap();
-            workspace.set_active(2);
+            let fresh = workspace.new_scratch(MAIN).unwrap();
+            workspace.set_active(MAIN, 2);
             workspace.persist().unwrap();
             // Typing into that still-clean tab is now the ONLY false -> true
             // dirty edge after the last explicit persist, so it is what proves
@@ -1075,7 +1460,7 @@ mod tests {
     fn closing_a_dirty_tab_just_closes_it() {
         let (_dir, mut workspace) = workspace();
         let first = workspace.session().buffers[0].id.clone();
-        let second = workspace.new_scratch().unwrap();
+        let second = workspace.new_scratch(MAIN).unwrap();
         workspace.update_text(&second, "unsaved work").unwrap();
 
         workspace.close(&second).unwrap();
@@ -1104,11 +1489,11 @@ mod tests {
         let (_dir, mut workspace) = workspace();
         let first = workspace.session().buffers[0].id.clone();
         workspace.update_text(&first, "one").unwrap();
-        let second = workspace.new_scratch().unwrap();
+        let second = workspace.new_scratch(MAIN).unwrap();
         workspace.update_text(&second, "two").unwrap();
-        let third = workspace.new_scratch().unwrap();
+        let third = workspace.new_scratch(MAIN).unwrap();
 
-        let closed = workspace.close_all().unwrap();
+        let closed = workspace.close_all(MAIN).unwrap();
 
         assert_eq!(closed, 3);
         assert_eq!(workspace.session().buffers.len(), 1);
@@ -1131,8 +1516,8 @@ mod tests {
             let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
             let id = workspace.session().buffers[0].id.clone();
             workspace.update_text(&id, "will be discarded").unwrap();
-            workspace.new_scratch().unwrap();
-            workspace.close_all().unwrap();
+            workspace.new_scratch(MAIN).unwrap();
+            workspace.close_all(MAIN).unwrap();
         }
         let (restored, note) = Workspace::open(dir.path()).unwrap();
         assert!(note.is_none());
@@ -1149,10 +1534,14 @@ mod tests {
         let first = workspace.session().buffers[0].id.clone();
         let file = dir.path().join("already.txt");
         fs::write(&file, "on disk").unwrap();
-        workspace.open_path(&file).unwrap();
-        let third = workspace.new_scratch().unwrap();
+        workspace.open_path(MAIN, &file).unwrap();
+        let third = workspace.new_scratch(MAIN).unwrap();
 
-        let pending: Vec<String> = workspace.unsaved_tabs().into_iter().map(|b| b.id).collect();
+        let pending: Vec<String> = workspace
+            .unsaved_tabs(MAIN)
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
         assert_eq!(
             pending,
             vec![first, third],
@@ -1165,13 +1554,13 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let id = workspace.session().buffers[0].id.clone();
         workspace.update_text(&id, "content").unwrap();
-        assert_eq!(workspace.unsaved_tabs().len(), 1);
+        assert_eq!(workspace.unsaved_tabs(MAIN).len(), 1);
 
         let target = dir.path().join("now_named.txt");
         workspace
             .save(&id, Some(&target.to_string_lossy()))
             .unwrap();
-        assert!(workspace.unsaved_tabs().is_empty());
+        assert!(workspace.unsaved_tabs(MAIN).is_empty());
     }
 
     #[test]
@@ -1179,7 +1568,7 @@ mod tests {
         // The UI debounces update_text, so a keystroke just before a close
         // lands just after it. That must not resurrect the file.
         let (_dir, mut workspace) = workspace();
-        let doomed = workspace.new_scratch().unwrap();
+        let doomed = workspace.new_scratch(MAIN).unwrap();
         workspace
             .update_text(&doomed, "a password, pasted for a second")
             .unwrap();
@@ -1202,7 +1591,7 @@ mod tests {
         let (_dir, mut workspace) = workspace();
         let first = workspace.session().buffers[0].id.clone();
         workspace.update_text(&first, "secret").unwrap();
-        workspace.close_all().unwrap();
+        workspace.close_all(MAIN).unwrap();
 
         workspace.update_text(&first, "secret").unwrap();
         assert_eq!(workspace.store().read_buffer(&first).unwrap(), "");
@@ -1213,14 +1602,14 @@ mod tests {
     #[test]
     fn a_closed_scratch_tab_can_be_brought_back_with_its_text() {
         let (_dir, mut workspace) = workspace();
-        let id = workspace.new_scratch().unwrap();
+        let id = workspace.new_scratch(MAIN).unwrap();
         workspace
             .update_text(&id, "the note I closed by accident")
             .unwrap();
         workspace.close(&id).unwrap();
         assert!(workspace.session().buffer(&id).is_none());
 
-        let restored = workspace.restore_last_closed().unwrap().unwrap();
+        let restored = workspace.restore_last_closed(MAIN).unwrap().unwrap();
 
         assert_eq!(restored, id);
         assert_eq!(
@@ -1235,10 +1624,10 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let file = dir.path().join("notes.sql");
         fs::write(&file, "select 1;\n").unwrap();
-        let (id, _) = workspace.open_path(&file).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &file).unwrap();
         workspace.close(&id).unwrap();
 
-        let restored = workspace.restore_last_closed().unwrap().unwrap();
+        let restored = workspace.restore_last_closed(MAIN).unwrap().unwrap();
         assert_eq!(restored, id);
         let buffer = workspace.session().buffer(&id).unwrap();
         let canonical = fs::canonicalize(&file).unwrap();
@@ -1257,16 +1646,16 @@ mod tests {
     #[test]
     fn tabs_come_back_in_the_order_they_were_closed() {
         let (_dir, mut workspace) = workspace();
-        let a = workspace.new_scratch().unwrap();
+        let a = workspace.new_scratch(MAIN).unwrap();
         workspace.update_text(&a, "first closed").unwrap();
-        let b = workspace.new_scratch().unwrap();
+        let b = workspace.new_scratch(MAIN).unwrap();
         workspace.update_text(&b, "second closed").unwrap();
         workspace.close(&a).unwrap();
         workspace.close(&b).unwrap();
 
-        assert_eq!(workspace.restore_last_closed().unwrap().unwrap(), b);
-        assert_eq!(workspace.restore_last_closed().unwrap().unwrap(), a);
-        assert!(workspace.restore_last_closed().unwrap().is_none());
+        assert_eq!(workspace.restore_last_closed(MAIN).unwrap().unwrap(), b);
+        assert_eq!(workspace.restore_last_closed(MAIN).unwrap().unwrap(), a);
+        assert!(workspace.restore_last_closed(MAIN).unwrap().is_none());
     }
 
     #[test]
@@ -1274,7 +1663,7 @@ mod tests {
         let (_dir, mut workspace) = workspace();
         let mut ids = Vec::new();
         for i in 0..(session::CLOSED_HISTORY + 3) {
-            let id = workspace.new_scratch().unwrap();
+            let id = workspace.new_scratch(MAIN).unwrap();
             workspace.update_text(&id, &format!("note {i}")).unwrap();
             workspace.close(&id).unwrap();
             ids.push(id);
@@ -1296,22 +1685,22 @@ mod tests {
         let (_dir, mut workspace) = workspace();
         let first = workspace.session().buffers[0].id.clone();
         workspace.update_text(&first, "one").unwrap();
-        let second = workspace.new_scratch().unwrap();
+        let second = workspace.new_scratch(MAIN).unwrap();
         workspace.update_text(&second, "two").unwrap();
 
-        workspace.close_all().unwrap();
+        workspace.close_all(MAIN).unwrap();
         assert_eq!(workspace.session().buffers.len(), 1);
 
-        workspace.restore_last_closed().unwrap();
+        workspace.restore_last_closed(MAIN).unwrap();
         assert_eq!(workspace.text(&second).unwrap(), "two");
-        workspace.restore_last_closed().unwrap();
+        workspace.restore_last_closed(MAIN).unwrap();
         assert_eq!(workspace.text(&first).unwrap(), "one");
     }
 
     #[test]
     fn forgetting_the_history_removes_the_text_too() {
         let (_dir, mut workspace) = workspace();
-        let id = workspace.new_scratch().unwrap();
+        let id = workspace.new_scratch(MAIN).unwrap();
         workspace.update_text(&id, "a secret I closed").unwrap();
         workspace.close(&id).unwrap();
         assert_eq!(
@@ -1321,7 +1710,7 @@ mod tests {
 
         assert_eq!(workspace.forget_closed_history().unwrap(), 1);
         assert_eq!(workspace.store().read_closed(&id).unwrap(), "");
-        assert!(workspace.restore_last_closed().unwrap().is_none());
+        assert!(workspace.restore_last_closed(MAIN).unwrap().is_none());
     }
 
     #[test]
@@ -1330,10 +1719,10 @@ mod tests {
         let id;
         {
             let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
-            id = workspace.new_scratch().unwrap();
+            id = workspace.new_scratch(MAIN).unwrap();
             workspace.update_text(&id, "closed then restored").unwrap();
             workspace.close(&id).unwrap();
-            workspace.restore_last_closed().unwrap();
+            workspace.restore_last_closed(MAIN).unwrap();
         }
         let (restored, _) = Workspace::open(dir.path()).unwrap();
         assert_eq!(restored.text(&id).unwrap(), "closed then restored");
@@ -1346,7 +1735,7 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let file = dir.path().join("config.conf");
         fs::write(&file, "original\n").unwrap();
-        let (id, _) = workspace.open_path(&file).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &file).unwrap();
         workspace.update_text(&id, "my unsaved edit\n").unwrap();
         fs::write(&file, "changed by another program\n").unwrap();
 
@@ -1369,7 +1758,7 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let from = dir.path().join("old_name.txt");
         fs::write(&from, "body").unwrap();
-        let (id, _) = workspace.open_path(&from).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &from).unwrap();
 
         let to = dir.path().join("new_name.sql");
         workspace.rename(&id, &to.to_string_lossy()).unwrap();
@@ -1388,7 +1777,7 @@ mod tests {
         let occupied = dir.path().join("b.txt");
         fs::write(&from, "mine").unwrap();
         fs::write(&occupied, "someone else's").unwrap();
-        let (id, _) = workspace.open_path(&from).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &from).unwrap();
 
         assert!(workspace.rename(&id, &occupied.to_string_lossy()).is_err());
         assert_eq!(fs::read_to_string(&occupied).unwrap(), "someone else's");
@@ -1400,7 +1789,7 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let original = dir.path().join("live.txt");
         fs::write(&original, "first").unwrap();
-        let (id, _) = workspace.open_path(&original).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &original).unwrap();
         workspace.update_text(&id, "edited, not saved").unwrap();
 
         let copy = dir.path().join("copy.txt");
@@ -1425,9 +1814,9 @@ mod tests {
     fn close_others_left_and_right_close_the_right_tabs() {
         let (_dir, mut workspace) = workspace();
         let a = workspace.session().buffers[0].id.clone();
-        let b = workspace.new_scratch().unwrap();
-        let c = workspace.new_scratch().unwrap();
-        let d = workspace.new_scratch().unwrap();
+        let b = workspace.new_scratch(MAIN).unwrap();
+        let c = workspace.new_scratch(MAIN).unwrap();
+        let d = workspace.new_scratch(MAIN).unwrap();
 
         assert_eq!(workspace.close_to_left(&c).unwrap(), 2);
         let left: Vec<String> = workspace
@@ -1442,8 +1831,8 @@ mod tests {
         assert_eq!(workspace.close_to_right(&c).unwrap(), 1);
         assert_eq!(workspace.session().buffers.len(), 1);
 
-        let e = workspace.new_scratch().unwrap();
-        workspace.new_scratch().unwrap();
+        let e = workspace.new_scratch(MAIN).unwrap();
+        workspace.new_scratch(MAIN).unwrap();
         assert_eq!(workspace.close_others(&e).unwrap(), 2);
         assert_eq!(workspace.session().buffers.len(), 1);
         assert_eq!(workspace.session().buffers[0].id, e);
@@ -1457,14 +1846,16 @@ mod tests {
         for name in ["one.txt", "two.txt", "three.txt"] {
             let path = dir.path().join(name);
             fs::write(&path, "x").unwrap();
-            workspace.open_path(&path).unwrap();
+            workspace.open_path(MAIN, &path).unwrap();
         }
         let recent = &workspace.session().recent;
         assert!(recent[0].ends_with("three.txt"), "newest first: {recent:?}");
         assert!(recent[2].ends_with("one.txt"));
 
         // Re-opening moves it to the front rather than duplicating it.
-        workspace.open_path(dir.path().join("one.txt")).unwrap();
+        workspace
+            .open_path(MAIN, dir.path().join("one.txt"))
+            .unwrap();
         let recent = &workspace.session().recent;
         assert!(recent[0].ends_with("one.txt"));
         assert_eq!(recent.len(), 3, "no duplicate: {recent:?}");
@@ -1476,7 +1867,7 @@ mod tests {
         for i in 0..(session::RECENT_FILES + 5) {
             let path = dir.path().join(format!("f{i}.txt"));
             fs::write(&path, "x").unwrap();
-            workspace.open_path(&path).unwrap();
+            workspace.open_path(MAIN, &path).unwrap();
         }
         assert_eq!(workspace.session().recent.len(), session::RECENT_FILES);
     }
@@ -1491,13 +1882,13 @@ mod tests {
     #[test]
     fn a_closed_untitled_number_is_reused() {
         let (_dir, mut workspace) = workspace();
-        let second = workspace.new_scratch().unwrap();
+        let second = workspace.new_scratch(MAIN).unwrap();
         assert_eq!(workspace.session().buffer(&second).unwrap().title, "new 2");
-        let third = workspace.new_scratch().unwrap();
+        let third = workspace.new_scratch(MAIN).unwrap();
         assert_eq!(workspace.session().buffer(&third).unwrap().title, "new 3");
 
         workspace.close(&second).unwrap();
-        let fourth = workspace.new_scratch().unwrap();
+        let fourth = workspace.new_scratch(MAIN).unwrap();
         assert_eq!(
             workspace.session().buffer(&fourth).unwrap().title,
             "new 2",
@@ -1508,17 +1899,22 @@ mod tests {
     #[test]
     fn reorder_keeps_the_user_on_the_tab_they_were_viewing() {
         let (_dir, mut workspace) = workspace();
-        let b = workspace.new_scratch().unwrap();
-        let _c = workspace.new_scratch().unwrap();
+        let b = workspace.new_scratch(MAIN).unwrap();
+        let _c = workspace.new_scratch(MAIN).unwrap();
         let index_of_b = workspace.session().index_of(&b).unwrap();
-        workspace.set_active(index_of_b);
+        workspace.set_active(MAIN, index_of_b);
 
-        workspace.reorder(0, 2);
+        workspace.reorder(MAIN, 0, 2);
 
+        assert_eq!(
+            workspace.session().window(MAIN).unwrap().active.as_deref(),
+            Some(b.as_str()),
+            "the active tab followed its move, rather than its old index"
+        );
         assert_eq!(
             workspace.session().buffers[workspace.session().active].id,
             b,
-            "the active tab followed its move, rather than its old index"
+            "and the legacy index an older build would read agrees"
         );
     }
 
@@ -1526,9 +1922,9 @@ mod tests {
     fn reorder_ignores_out_of_range_requests() {
         let (_dir, mut workspace) = workspace();
         let before = workspace.session().clone();
-        workspace.reorder(0, 9);
-        workspace.reorder(9, 0);
-        workspace.reorder(0, 0);
+        workspace.reorder(MAIN, 0, 9);
+        workspace.reorder(MAIN, 9, 0);
+        workspace.reorder(MAIN, 0, 0);
         assert_eq!(&before, workspace.session());
     }
 
@@ -1540,7 +1936,7 @@ mod tests {
         let file = dir.path().join("script.py");
         fs::write(&file, "print('hi')\n").unwrap();
 
-        let (id, text) = workspace.open_path(&file).unwrap();
+        let (id, text) = workspace.open_path(MAIN, &file).unwrap();
         assert_eq!(text, "print('hi')\n");
         let buffer = workspace.session().buffer(&id).unwrap();
         assert_eq!(buffer.language, "python");
@@ -1554,9 +1950,9 @@ mod tests {
         let file = dir.path().join("once.txt");
         fs::write(&file, "body").unwrap();
 
-        let (first, _) = workspace.open_path(&file).unwrap();
+        let (first, _) = workspace.open_path(MAIN, &file).unwrap();
         let count = workspace.session().buffers.len();
-        let (second, text) = workspace.open_path(&file).unwrap();
+        let (second, text) = workspace.open_path(MAIN, &file).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(text, "body");
@@ -1573,7 +1969,7 @@ mod tests {
         drop(file);
 
         let before = workspace.session().clone();
-        let error = workspace.open_path(&huge).unwrap_err().to_string();
+        let error = workspace.open_path(MAIN, &huge).unwrap_err().to_string();
         assert!(
             error.contains("limit"),
             "the message should say why: {error}"
@@ -1593,7 +1989,7 @@ mod tests {
         file.set_len(MAX_OPEN_BYTES).unwrap();
         drop(file);
         assert!(
-            workspace.open_path(&big).is_ok(),
+            workspace.open_path(MAIN, &big).is_ok(),
             "the cap must be inclusive"
         );
     }
@@ -1605,7 +2001,7 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let folder = dir.path().join("a_directory");
         fs::create_dir(&folder).unwrap();
-        let error = workspace.open_path(&folder).unwrap_err().to_string();
+        let error = workspace.open_path(MAIN, &folder).unwrap_err().to_string();
         assert!(error.contains("not a regular file"), "got: {error}");
     }
 
@@ -1671,7 +2067,7 @@ mod tests {
         let file = dir.path().join("windows.txt");
         fs::write(&file, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
 
-        let (id, text) = workspace.open_path(&file).unwrap();
+        let (id, text) = workspace.open_path(MAIN, &file).unwrap();
         assert_eq!(text, "alpha\nbeta\ngamma\n", "normalised for the editor");
         assert_eq!(workspace.session().buffer(&id).unwrap().eol, "crlf");
 
@@ -1690,7 +2086,7 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let file = dir.path().join("unix.txt");
         fs::write(&file, "one\ntwo\n").unwrap();
-        let (id, _) = workspace.open_path(&file).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &file).unwrap();
         assert_eq!(workspace.session().buffer(&id).unwrap().eol, "lf");
         workspace.update_text(&id, "one\ntwo\nthree\n").unwrap();
         workspace.save(&id, None).unwrap();
@@ -1704,7 +2100,7 @@ mod tests {
         // 0xFF is not valid UTF-8; decoding replaces it and the byte is lost.
         fs::write(&file, b"caf\xE9 nota\xFFion").unwrap();
 
-        let (id, _) = workspace.open_path(&file).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &file).unwrap();
         assert!(workspace.session().buffer(&id).unwrap().lossy);
 
         let error = workspace.save(&id, None).unwrap_err().to_string();
@@ -1731,9 +2127,9 @@ mod tests {
         fs::write(&file, "body").unwrap();
         let awkward = dir.path().join(".").join("once.txt");
 
-        let (first, _) = workspace.open_path(&file).unwrap();
+        let (first, _) = workspace.open_path(MAIN, &file).unwrap();
         let count = workspace.session().buffers.len();
-        let (second, _) = workspace.open_path(&awkward).unwrap();
+        let (second, _) = workspace.open_path(MAIN, &awkward).unwrap();
 
         assert_eq!(first, second, "`./` must not produce a rival tab");
         assert_eq!(workspace.session().buffers.len(), count);
@@ -1744,7 +2140,7 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let file = dir.path().join("rel.txt");
         fs::write(&file, "x").unwrap();
-        let (id, _) = workspace.open_path(&file).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &file).unwrap();
         let stored = workspace
             .session()
             .buffer(&id)
@@ -1799,7 +2195,7 @@ mod tests {
         let file = dir.path().join("big.sql");
         fs::write(&file, "select 1;\nselect 2;\n").unwrap();
 
-        let (id, text) = workspace.open_path(&file).unwrap();
+        let (id, text) = workspace.open_path(MAIN, &file).unwrap();
         assert_eq!(text, "select 1;\nselect 2;\n");
         assert!(
             !workspace
@@ -1818,7 +2214,7 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let file = dir.path().join("edited.sql");
         fs::write(&file, "original\n").unwrap();
-        let (id, _) = workspace.open_path(&file).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &file).unwrap();
 
         workspace
             .update_text(&id, "edited but not saved\n")
@@ -1847,7 +2243,7 @@ mod tests {
         let id;
         {
             let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
-            let (opened, _) = workspace.open_path(&file).unwrap();
+            let (opened, _) = workspace.open_path(MAIN, &file).unwrap();
             id = opened;
             workspace.update_text(&id, "half-finished edit\n").unwrap();
         }
@@ -1866,7 +2262,7 @@ mod tests {
         let id;
         {
             let (mut workspace, _) = Workspace::open(dir.path()).unwrap();
-            let (opened, _) = workspace.open_path(&file).unwrap();
+            let (opened, _) = workspace.open_path(MAIN, &file).unwrap();
             id = opened;
         }
         fs::write(&file, "changed by something else\n").unwrap();
@@ -1881,7 +2277,7 @@ mod tests {
         let (dir, mut workspace) = workspace();
         let file = dir.path().join("intact.sql");
         fs::write(&file, "important contents\n").unwrap();
-        let (id, _) = workspace.open_path(&file).unwrap();
+        let (id, _) = workspace.open_path(MAIN, &file).unwrap();
 
         workspace.save(&id, None).unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap(), "important contents\n");
@@ -1906,21 +2302,21 @@ mod tests {
         let file = fs::File::create(&too_big).unwrap();
         file.set_len(3 * 1024 * 1024).unwrap();
         drop(file);
-        let error = workspace.open_path(&too_big).unwrap_err().to_string();
+        let error = workspace.open_path(MAIN, &too_big).unwrap_err().to_string();
         assert!(error.contains("limit"), "got: {error}");
 
         let fine = dir.path().join("under.bin");
         let file = fs::File::create(&fine).unwrap();
         file.set_len(1024 * 1024).unwrap();
         drop(file);
-        assert!(workspace.open_path(&fine).is_ok());
+        assert!(workspace.open_path(MAIN, &fine).is_ok());
     }
 
     #[test]
     fn opening_a_missing_file_reports_an_error_and_changes_nothing() {
         let (dir, mut workspace) = workspace();
         let before = workspace.session().clone();
-        let result = workspace.open_path(dir.path().join("absent.txt"));
+        let result = workspace.open_path(MAIN, dir.path().join("absent.txt"));
         assert!(result.is_err());
         assert_eq!(&before, workspace.session());
     }
@@ -2059,7 +2455,7 @@ mod tests {
             workspace
                 .update_text(&first, "server password reminder")
                 .unwrap();
-            let second = workspace.new_scratch().unwrap();
+            let second = workspace.new_scratch(MAIN).unwrap();
             workspace.update_text(&second, "the other note").unwrap();
             ids = vec![first, second];
         }

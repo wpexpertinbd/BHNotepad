@@ -71,6 +71,10 @@ export const rename = (id: string, path: string) => invoke<Session>("rename", { 
 export const saveCopy = (id: string, path: string) => invoke<void>("save_copy", { id, path });
 export const reveal = (path: string) => invoke<void>("reveal", { path });
 export const moveToTrash = (id: string) => invoke<Session>("move_to_trash", { id });
+/** Moves a tab into a brand new window — one you can drag to another monitor.
+ *  Returns THIS window's session, with the tab gone from its strip. */
+export const moveTabToNewWindow = (id: string) =>
+  invoke<Session>("move_tab_to_new_window", { id });
 export const unsavedTabs = () => invoke<Buffer[]>("unsaved_tabs");
 export const saveBuffer = (id: string, path?: string) =>
   invoke<Session>("save", { id, path: path ?? null });

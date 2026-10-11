@@ -168,6 +168,15 @@ export function App() {
     const failures = listen<string>("bhnotepad://open-failed", (event) => {
       setStatus(String(event.payload));
     });
+    // Tabs inherited from a window the user closed. They are moved rather
+    // than closed — see the Rust side — but tabs appearing unannounced looks
+    // like a glitch, so say where they came from.
+    const arrivals = listen<number>("bhnotepad://tabs-arrived", (event) => {
+      const count = Number(event.payload) || 0;
+      if (count > 0) {
+        note(`${count} ${count === 1 ? "tab" : "tabs"} moved here from the window you closed`);
+      }
+    });
     const pending = listen("bhnotepad://session-changed", () => {
       void (async () => {
         try {
@@ -181,8 +190,9 @@ export function App() {
     return () => {
       void pending.then((unlisten) => unlisten());
       void failures.then((unlisten) => unlisten());
+      void arrivals.then((unlisten) => unlisten());
     };
-  }, [fail]);
+  }, [fail, note]);
 
   // What version is running, and whether automatic checks are wanted.
   useEffect(() => {
@@ -810,7 +820,28 @@ export function App() {
     };
   }, []);
 
+  // Sends the active tab into a window of its own, which can then be dragged
+  // to another monitor. The tab leaves this window's strip; if it was the last
+  // one here, the core leaves a fresh scratch tab behind so there is still
+  // somewhere to type.
+  const handleMoveToNewWindow = useCallback(async () => {
+    if (!active) return;
+    try {
+      const updated = await ipc.moveTabToNewWindow(active.id);
+      setSession(updated);
+      forgetState.current?.(active.id);
+      note(`${active.title} moved to a new window`);
+    } catch (error) {
+      fail("Could not open a new window", error);
+    }
+  }, [active, fail, note]);
+
   // ── Render ────────────────────────────────────────────────────────────────
+  //
+  // ⚠️ EVERY hook has to be above this early return. A `useCallback` placed
+  // below it is only called on the renders that get that far, and React tears
+  // the whole tree down the moment the count changes — which shows up as an
+  // entirely blank window, with no error anywhere the user can see.
 
   if (!session || !active) {
     return <div className="loading">Opening your tabs…</div>;
@@ -871,6 +902,12 @@ export function App() {
           label: ON_WINDOWS ? "Move to Recycle Bin" : "Move to Trash",
           enabled: hasFile,
           run: () => void handleTrash(),
+        },
+        {
+          label: "Move Tab to New Window",
+          separated: true,
+          enabled: Boolean(active),
+          run: () => void handleMoveToNewWindow(),
         },
         {
           label: "Close tab",

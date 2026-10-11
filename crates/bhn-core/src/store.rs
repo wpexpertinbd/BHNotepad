@@ -510,6 +510,10 @@ mod tests {
 
         let (loaded, note) = store.load_session();
         assert!(note.is_none());
+        // Compare against the NORMALIZED original: loading fills in each
+        // window's active tab, which a hand-built session has not done.
+        session.normalize();
+        assert_eq!(session.windows[0].active.as_deref(), Some("s2"));
         assert_eq!(loaded, session);
         assert_eq!(store.read_buffer("s1").unwrap(), "scratch text");
     }

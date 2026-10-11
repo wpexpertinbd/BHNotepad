@@ -790,3 +790,70 @@ strip for nothing. Measured: 3 re-renders across the whole test instead of hundr
 and `app_drag` needs it unlocked. The HTML5 drag plumbing itself is unchanged (reordering already
 worked); what is new is the edge-scroll handler, and the harness exercises that exact code with
 real `DragEvent`s.
+
+---
+
+## 🪟 More than one window — step 1 (2026-10-11)
+
+Benjamin: *"I saw that I can drag & drop any open notepad++ tab & can open it as a own Notepad++
+to another monitor from monitor 1 to 2, does it possible?"* Split into **step 1: File → Move Tab
+to New Window, windows restored where they were** (this), and step 2: the drag-out gesture.
+Step 1 first because all the session work lives there and step 2 is a gesture onto it.
+
+### The model
+- `Buffer.window` (serde default `"main"`) and `Session.windows: Vec<WindowRecord>`
+  (id = the Tauri window label, active tab id, logical x/y/width/height).
+- **Every existing session upgrades silently**: no `windows` and no `window` field means one
+  window holding everything, focused where the old `active` index pointed.
+- `Session.active` is now **derived**, not authoritative — it is still written so an older build
+  reinstalled over this one opens on the right tab, and it is still *read* because it is the only
+  place a pre-windows session records the focused tab.
+
+### ⭐ The frontend never learned about windows
+Every command returns `view(workspace, window.label())` — the session filtered to the asking
+window, with the active index made window-local. The UI still works on a flat list and an index,
+exactly as it did with one window, so the whole multi-window change is ~40 lines of frontend.
+Commands get the asking window from Tauri's injected `window: tauri::Window`.
+
+### Decisions that protect the app's reason to exist
+- **Closing a window MOVES its tabs to another window**, never closes them. Clicking a window's
+  close button is not an answer to "do you want to discard these notes", and this app exists so
+  that question is never answered for the user. Close All, which asks, is the way to clear tabs.
+  The receiving window says "2 tabs moved here from the window you closed" — tabs appearing
+  unannounced look like a glitch.
+- **Every window always has a tab**, not just the first. An empty window has nowhere to type.
+- **A file already open is focused in whatever window holds it**, never opened a second time — two
+  tabs on the same file would mean two competing snapshots, and that does not stop being true
+  because the other copy is on the other monitor.
+- Untitled numbering stays session-wide, so two windows never both show `new 1`.
+
+### ⚠️ Four traps, all found by running it rather than by reading it
+1. **A `useCallback` placed below App.tsx's early return is a conditional hook.** React tore the
+   whole tree down the moment the hook count changed, and the symptom was an **entirely blank
+   window** — no error on screen, nothing in stderr, `tsc` perfectly happy. The window was even
+   visible, because the first render (session still null) had run the effect that calls `show()`.
+   Every hook must stay above that return, and there is now a comment there saying so.
+2. **Window geometry is physical pixels going out and logical pixels coming back.**
+   `outer_position`/`inner_size` answer in physical pixels; the builder and `set_position`/
+   `set_size` take logical. On this Retina Mac a window left at 60,80 / 900×600 came back as
+   120,160 / 1800×1200 — **doubling on every quit** until it would have left the screen. Convert
+   with `window.scale_factor()` before storing. Measured by quitting and reading `session.json`.
+3. **A closing window's webview still asks for its session state**, which re-created the record
+   `close_window` had just removed — so a window the user closed came back, empty, on the next
+   launch. `AppState.dismissed` holds the labels and refuses to register them again.
+4. **Quitting must not look like closing windows one by one.** `RunEvent::ExitRequested` sets a
+   `QUITTING` flag before any window gets its close event, so a quit leaves every window intact.
+   Verified on macOS: with two windows open, `osascript … to quit` then relaunch gives two windows
+   back; without the flag they would have collapsed into one.
+
+### ⚠️ Testing a multi-window build
+`osascript -e 'tell application id "…" to quit'` exercises the **real quit path** (ExitRequested →
+window closes) without needing the screen unlocked — `kill` does not. And the HTML menu bar, which
+`app_click` refuses as a pop-up control, **can** be opened by clicking its coordinates through
+System Events; once open, its items are ordinary `AXMenuItem`s that `app_click` will press. That
+is how Move Tab to New Window was finally driven for real.
+
+### Formatting
+`cargo fmt --all` reformatted the Tauri shell, which had been hand-indented with tabs — hence the
+large diff in `app/src-tauri/src/lib.rs`. CI now checks `--all` so it stays consistent and nobody
+has to guess the house style of that file again.

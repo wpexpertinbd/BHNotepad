@@ -93,6 +93,10 @@ and checks all six tabs and their text came back.
 - **Save All** walks your unsaved tabs one at a time, asking where each should go.
 - **Close All** clears the board behind a single confirmation that tells you how many tabs have
   never been saved.
+- **More than one window** — **File → Move Tab to New Window** gives a tab a window of its own,
+  which you can drag to a second monitor. Each window has its own tabs, and both come back next
+  launch on the monitor you left them on. Closing a window **moves** its tabs to the other window
+  rather than discarding them; Close All, which asks first, is how you get rid of tabs.
 
 ## 💻 Platform support
 
@@ -164,7 +168,8 @@ back, and Uninstall works from then on. No registry editing needed.
 - **Notepad++ plugins do not work and never will.** They are Windows DLLs written against a Win32
   API that does not exist here. Nothing short of running Notepad++ itself will load them.
 - **Not a clone.** No macro recording, column-mode editing, document map or FTP browser yet.
-- **One window.** Tabs live in a single window for now.
+- **A tab cannot yet be dragged out** of the strip to make a window. Use **File → Move Tab to New
+  Window**, then drag the window itself wherever you want it.
 - **A file that is not valid UTF-8 can be read but not saved in place.** The bytes that could not
   be decoded are shown as replacement characters, and writing those back would destroy them, so
   Save over the original is refused and Save As is offered. Proper encoding support is a later job.
