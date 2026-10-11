@@ -726,6 +726,8 @@ controls stop disagreeing with the palette.
 
 ## 📑 Tab paging — the hidden tabs were genuinely unreachable (2026-10-11)
 
+**Shipped in v0.4.7** — 7 assets, all five build jobs green.
+
 Benjamin, with 15+ tabs open: *"I don't able to see them at all until I delete some"*.
 
 He was right, and it was worse than slow — `.tabs` was `overflow-x: auto` with
