@@ -60,10 +60,12 @@ export function TabBar({
     if (!el) return;
     // A pixel of slack: fractional layout widths make an exact comparison
     // claim there is more to the right when the last tab is fully visible.
-    setHidden({
-      left: el.scrollLeft > 1,
-      right: el.scrollLeft + el.clientWidth < el.scrollWidth - 1,
-    });
+    const left = el.scrollLeft > 1;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+    // Only when something actually changed. This runs on every scroll event,
+    // and while a drag is auto-scrolling that is sixty times a second — a new
+    // object each time would re-render the whole strip for nothing.
+    setHidden((was) => (was.left === left && was.right === right ? was : { left, right }));
   }, []);
 
   /** Moves one strip-width, then backs up to the nearest tab's left edge so
@@ -96,6 +98,79 @@ export function TabBar({
     measure();
   };
 
+  // ── Dragging a tab onto another page ──────────────────────────────────
+  //
+  // Reordering is drag-and-drop, and a drop target has to be on screen to be
+  // dropped on. Once the strip pages, "move this tab to the front" meant
+  // dragging to an edge and watching nothing happen. Holding the tab near
+  // either end of the strip now scrolls it, so the whole run of tabs comes
+  // past under the pointer.
+
+  /** How close to an end the pointer has to be, in pixels. */
+  const EDGE = 56;
+  /** Pixels per frame at the very edge; it eases in across the zone. */
+  const EDGE_SPEED = 14;
+
+  const edgeTimer = useRef<number | null>(null);
+  const edgeSpeed = useRef(0);
+  /** When the pointer was last seen over the strip, for the watchdog below. */
+  const lastOver = useRef(0);
+
+  const stopEdgeScroll = useCallback(() => {
+    if (edgeTimer.current !== null) window.clearInterval(edgeTimer.current);
+    edgeTimer.current = null;
+    edgeSpeed.current = 0;
+  }, []);
+
+  const edgeScroll = (clientX: number) => {
+    const el = strip.current;
+    if (!el) return;
+    const box = el.getBoundingClientRect();
+    lastOver.current = Date.now();
+
+    // Ease in, so brushing the edge nudges and parking at it travels.
+    const intoLeft = box.left + EDGE - clientX;
+    const intoRight = clientX - (box.right - EDGE);
+    if (intoLeft > 0) {
+      edgeSpeed.current = -Math.ceil((Math.min(intoLeft, EDGE) / EDGE) * EDGE_SPEED);
+    } else if (intoRight > 0) {
+      edgeSpeed.current = Math.ceil((Math.min(intoRight, EDGE) / EDGE) * EDGE_SPEED);
+    } else {
+      edgeSpeed.current = 0;
+    }
+
+    if (edgeTimer.current !== null) return;
+    edgeTimer.current = window.setInterval(() => {
+      const el = strip.current;
+      // ⚠️ The watchdog: dragging out of the strip entirely (down into the
+      // editor, or off the window) fires no further dragover here, and
+      // without this the strip would keep travelling on its own.
+      if (!el || Date.now() - lastOver.current > 200) {
+        stopEdgeScroll();
+        return;
+      }
+      if (edgeSpeed.current === 0) return;
+      const before = el.scrollLeft;
+      el.scrollLeft = before + edgeSpeed.current;
+      if (el.scrollLeft === before) return; // already at that end
+      measure();
+    }, 16);
+  };
+
+  // A drag that ends anywhere at all must stop the strip — including one
+  // dropped on another window or cancelled with Escape, neither of which
+  // reaches the tab's own handlers.
+  useEffect(() => {
+    const stop = () => stopEdgeScroll();
+    window.addEventListener("dragend", stop);
+    window.addEventListener("drop", stop);
+    return () => {
+      window.removeEventListener("dragend", stop);
+      window.removeEventListener("drop", stop);
+      stopEdgeScroll();
+    };
+  }, [stopEdgeScroll]);
+
   // Keep the active tab on screen. Ctrl+Tab, a new tab and closing a tab can
   // all land on one that is currently off the end; without this the editor
   // would show a document whose tab is nowhere to be seen.
@@ -125,7 +200,19 @@ export function TabBar({
   return (
     <div className="tabbar" role="tablist">
       {leading}
-      <div className="tabs" ref={strip} onScroll={measure}>
+      <div
+        className="tabs"
+        ref={strip}
+        onScroll={measure}
+        // On the strip rather than on each tab: the gap after the last tab is
+        // part of the strip too, and that is exactly where a drag to the end
+        // comes to rest.
+        onDragOver={(event) => {
+          event.preventDefault();
+          edgeScroll(event.clientX);
+        }}
+        onDrop={stopEdgeScroll}
+      >
         {buffers.map((buffer, index) => (
           <div
             key={buffer.id}
@@ -152,12 +239,14 @@ export function TabBar({
             onDragLeave={() => setDragOver((at) => (at === index ? null : at))}
             onDrop={(event) => {
               event.preventDefault();
+              stopEdgeScroll();
               const from = dragFrom.current;
               dragFrom.current = null;
               setDragOver(null);
               if (from !== null && from !== index) onReorder(from, index);
             }}
             onDragEnd={() => {
+              stopEdgeScroll();
               dragFrom.current = null;
               setDragOver(null);
             }}

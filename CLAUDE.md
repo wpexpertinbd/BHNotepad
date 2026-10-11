@@ -767,3 +767,26 @@ never reach a commit.
 ⚠️ And trimming `session.json` by hand is not enough to reduce the tab count: `recover_orphans`
 turns every unreferenced snapshot back into a tab on the next launch, exactly as designed. Delete
 the `buffers/*.txt` files too.
+
+### Dragging a tab onto another page — edge auto-scroll (2026-10-11)
+
+Paging made an old limitation obvious: a drop target has to be ON SCREEN to be dropped on, so
+"move this tab to the front" meant dragging to the edge and watching nothing happen. Holding a
+dragged tab within 56 px of either end now scrolls the strip, easing in across the zone so
+brushing the edge nudges and parking at it travels (~250 px per 400 ms at the very edge).
+
+⚠️ **The watchdog is the part that matters.** Dragging out of the strip — down into the editor,
+off the window, or dropping on another application — fires no further `dragover` on the strip, so
+without a timeout the strip keeps travelling on its own. Measured both ways in a harness: with the
+watchdog, 0 px of drift after the drag leaves and the interval cleared; with it disabled, **104 px
+of the strip scrolling by itself** and the interval still running. `dragend`/`drop` are also
+listened for on the window, because Escape-cancelling a drag reaches neither tab handler.
+
+Also made `measure()` compare before calling `setHidden`. It runs on every scroll event, which
+during an auto-scroll is sixty times a second; a fresh object each time re-rendered the whole
+strip for nothing. Measured: 3 re-renders across the whole test instead of hundreds.
+
+⚠️ **Not yet driven as a real OS-level drag** — the Mac's screen was locked when this was written,
+and `app_drag` needs it unlocked. The HTML5 drag plumbing itself is unchanged (reordering already
+worked); what is new is the edge-scroll handler, and the harness exercises that exact code with
+real `DragEvent`s.
