@@ -28,8 +28,13 @@ Nothing about you or your notes leaves your machine.
   do not exist.
 - **Updates are never installed behind your back.** Nothing is downloaded until you press
   Download, and nothing is run until you press Install. Pressing Install starts the platform's own
-  installer — the disk image on macOS, the `.msi` on Windows — and quits BHNotepad so it can be
-  replaced. You still approve the install itself.
+  installer — the disk image on macOS, the `-setup.exe` on Windows — and quits BHNotepad so it
+  can be replaced. You still approve the install itself.
+- **Windows installs are per-user, never per-machine.** BHNotepad deliberately ships no `.msi`:
+  an MSI installs per-machine, so `msiexec` elevates and the app is then started in the
+  installer's SYSTEM context, where WebView2 cannot write its data folder. The NSIS
+  `-setup.exe` installs under your own profile, never elevates, and runs as you. The updater
+  refuses to run an `.msi` even if one appears in a release, and there is a test for that.
 - **The download is guarded three ways:**
   - A download URL is accepted only if its host is exactly `github.com` or
     `objects.githubusercontent.com`. An exact match, not a prefix — there is a test for

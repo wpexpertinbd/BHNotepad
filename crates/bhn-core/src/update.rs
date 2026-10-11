@@ -197,18 +197,38 @@ mod remote {
         ALLOWED_HOSTS.iter().any(|h| host.eq_ignore_ascii_case(h))
     }
 
+    /// Installer suffixes to look for on Windows.
+    ///
+    /// ⚠️ **The NSIS `-setup.exe` only — never an `.msi`.**
+    ///
+    /// An MSI installs per-machine, so `msiexec` elevates, and the step that
+    /// starts the app afterwards runs in the installer's SYSTEM context. The
+    /// app then launches as SYSTEM, WebView2 tries to put its data folder in
+    /// `C:\WINDOWS\system32\config\systemprofile\AppData\Local\…`, cannot
+    /// write there, and the user is shown "Microsoft Edge can't read and write
+    /// to its data directory". Benjamin hit exactly that.
+    ///
+    /// BHNotepad no longer ships an MSI at all. This list stays narrow so that
+    /// if one ever reappears in a release, the updater still will not run it.
+    pub const WINDOWS_ASSETS: &[&str] = &["-setup.exe"];
+    pub const MACOS_ASSETS: &[&str] = &[".dmg"];
+    pub const LINUX_ASSETS: &[&str] = &[".deb", ".rpm"];
+
+    /// The installer suffixes wanted on the platform this build runs on.
+    fn wanted_assets() -> &'static [&'static str] {
+        if cfg!(target_os = "macos") {
+            MACOS_ASSETS
+        } else if cfg!(target_os = "windows") {
+            WINDOWS_ASSETS
+        } else {
+            LINUX_ASSETS
+        }
+    }
+
     /// The installer for this platform: (name, url, size).
     fn pick_asset(json: &serde_json::Value) -> Option<(String, String, u64)> {
-        let wanted: &[&str] = if cfg!(target_os = "macos") {
-            &[".dmg"]
-        } else if cfg!(target_os = "windows") {
-            &[".msi", "-setup.exe"]
-        } else {
-            &[".deb", ".rpm"]
-        };
-
         let assets = json.get("assets")?.as_array()?;
-        for suffix in wanted {
+        for suffix in wanted_assets() {
             for asset in assets {
                 let name = asset
                     .get("name")
@@ -244,6 +264,11 @@ mod remote {
         } else {
             lower.contains("x64") || lower.contains("x86_64") || lower.contains("amd64")
         }
+    }
+
+    #[cfg(test)]
+    pub fn pick_asset_for_test(json: &serde_json::Value) -> Option<(String, String, u64)> {
+        pick_asset(json)
     }
 
     #[cfg(test)]
@@ -460,6 +485,7 @@ pub use remote::{
 
 #[cfg(all(test, feature = "updates"))]
 mod remote_tests {
+    use super::remote::WINDOWS_ASSETS;
     use super::remote::*;
 
     // `host_allowed` and `matches_arch` are private; these exercise them
@@ -489,6 +515,39 @@ mod remote_tests {
         ] {
             assert!(!host_allowed_for_test(bad), "should refuse {bad}");
         }
+    }
+
+    #[test]
+    fn windows_never_installs_from_an_msi() {
+        // Runs on every platform, deliberately: this is what stops a Windows
+        // update starting the app as SYSTEM, and a Windows-only test would not
+        // protect it from an edit made on a Mac.
+        //
+        // An .msi makes msiexec elevate and start the app in the installer's
+        // SYSTEM context, which breaks WebView2 with "can't read and write to
+        // its data directory". The NSIS installer is per-user and does not.
+        assert!(
+            WINDOWS_ASSETS.contains(&"-setup.exe"),
+            "the per-user NSIS installer must be accepted"
+        );
+        assert!(
+            !WINDOWS_ASSETS.iter().any(|s| s.ends_with(".msi")),
+            "an MSI must never be chosen for a self-update: {WINDOWS_ASSETS:?}"
+        );
+    }
+
+    #[test]
+    fn a_release_offering_only_an_msi_yields_nothing_rather_than_running_it() {
+        let json = serde_json::json!({
+            "assets": [
+                {"name": "BHNotepad_1.0.0_x64_en-US.msi",
+                 "browser_download_url": "https://github.com/a/b/x64_en-US.msi", "size": 10}
+            ]
+        });
+        // On Windows: refused. Elsewhere: no .msi is wanted anyway. Either way
+        // the user is told there is no download rather than handed an
+        // installer that would start the app as SYSTEM.
+        assert!(pick_asset_for_test(&json).is_none());
     }
 
     #[test]

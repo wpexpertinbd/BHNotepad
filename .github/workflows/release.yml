@@ -45,7 +45,12 @@ jobs:
           - os: windows-latest
             name: Windows
             target: ""
-            args: --bundles msi,nsis
+            # NSIS only, no MSI. The MSI installs per-machine, so msiexec
+            # elevates and the app is started in the installer's SYSTEM
+            # context — WebView2 then cannot write its data folder and Edge
+            # reports "can't read and write to its data directory". The NSIS
+            # installer is per-user and does not elevate.
+            args: --bundles nsis
             optional: true
           - os: ubuntu-latest
             name: Linux (x86_64)
@@ -119,7 +124,7 @@ jobs:
           # here so this keeps working if that setting is ever changed back.
           files=()
           while IFS= read -r f; do files+=("$f"); done < <(find build.noindex target -type f \
-            \( -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \
+            \( -name '*.dmg' -o -name '*-setup.exe' \
                -o -name '*.deb' -o -name '*.rpm' \) \
             -not -name '*.sig' -not -name 'rw.*.dmg' 2>/dev/null | sort)
 

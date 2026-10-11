@@ -30,7 +30,6 @@
       "app",
       "dmg",
       "nsis",
-      "msi",
       "deb",
       "rpm"
     ],

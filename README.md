@@ -95,7 +95,7 @@ and checks all six tabs and their text came back.
 |---|---|---|
 | macOS (Apple silicon) | `.dmg` | Built and used daily on Apple silicon |
 | macOS (Intel) | `.dmg` | Built in CI |
-| Windows | `.exe` / `.msi` | Built in CI, **not yet run on real hardware** |
+| Windows | `.exe` | Per-user install, no administrator rights needed |
 | Linux (x86_64, arm64) | `.deb` / `.rpm` | Built in CI, **not yet run on real hardware** |
 
 Grab the latest from **[Releases](https://github.com/wpexpertinbd/BHNotepad/releases/latest)**.

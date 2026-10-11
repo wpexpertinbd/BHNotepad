@@ -633,3 +633,30 @@ itself** had only received 17 characters (status bar read `Ln 1, Col 18`), becau
 delivers text faster than the webview accepts it. Editor, snapshot and saved file agreed at every
 point. ⚠️ When UI automation produces a surprising result, check what the app actually
 *received* before believing the app is wrong.
+
+---
+
+## 🪟 Windows: ship the NSIS exe only, never an MSI (2026-10-11)
+
+Benjamin, running the Windows build: *"why I get this notice randomly"* — a dialog reading
+**"Microsoft Edge can't read and write to its data directory:
+`C:\WINDOWS\system32\config\systemprofile\AppData\Local\com.biswashost.bhnotepad\EBWebView`"**.
+
+⚠️ **`C:\WINDOWS\system32\config\systemprofile` is the SYSTEM account's profile.** That path in a
+WebView2 error means the app is running **as SYSTEM, not as the user**. It is the diagnostic, not
+a WebView2 bug.
+
+**Cause, and it was ours.** The updater preferred the `.msi`. An MSI installs per-machine, so
+`msiexec` elevates, and the step that starts the app afterwards runs in the installer's SYSTEM
+context. So it only happened *after an update installed* — hence "randomly".
+
+**Fix:** the MSI is gone entirely. `bundle.targets` no longer builds it, `release.yml` builds
+`--bundles nsis` and no longer collects `*.msi`, and `WINDOWS_ASSETS` is `["-setup.exe"]` only.
+The NSIS installer is `installMode: currentUser`: per-user, never elevates, starts the app as the
+user. Two tests guard it — that an MSI is never chosen, and that a release offering *only* an MSI
+yields no download rather than one that would start the app as SYSTEM. ⚠️ Both run on **every**
+platform on purpose: a Windows-only test would not protect this from an edit made on the Mac.
+
+⚠️ **Migration wrinkle to warn users about:** anyone who installed the old per-machine MSI will
+get the per-user NSIS install at the next update, leaving **two** copies. Uninstall the old one
+from Add/Remove Programs first.
