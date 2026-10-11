@@ -117,6 +117,17 @@ Right-click → Open does **not** work on current macOS versions — use Open An
 SmartScreen will warn about an unknown publisher (code-signing certificates are not free either).
 Click **More info → Run anyway**. The installer is per-user and needs no administrator rights.
 
+BHNotepad deliberately ships **no `.msi`**. An MSI installs per-machine, so `msiexec` elevates and
+the app ends up started in the installer's SYSTEM context — where WebView2 cannot write its data
+folder, and Edge complains it *"can't read and write to its data directory"* with a path under
+`C:\WINDOWS\system32\config\systemprofile`. The `-setup.exe` installs under your own profile and
+runs as you.
+
+If Windows ever says it **cannot find `…\AppData\Local\BHNotepad\uninstall.exe`** when you try to
+remove BHNotepad, the entry in Installed apps is pointing at an uninstaller that is no longer
+there. **Installing the latest version again repairs it** — the installer puts `uninstall.exe`
+back, and Uninstall works from then on. No registry editing needed.
+
 ## ⌨️ Shortcuts
 
 `Cmd` on macOS, `Ctrl` on Windows and Linux.
