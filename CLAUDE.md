@@ -1,6 +1,7 @@
 # BHNotepad — Notepad++-style editor for macOS, Windows & Linux
 
-**Project dir:** `/Users/benjamin/BHServe/www/notepad`
+**Project dir:** wherever this file is — the folder name is not load-bearing and nothing
+in the build depends on it. (It was `…/www/notepad`, renamed to `…/www/bhnotepad` on 2026-10-12.)
 **Started:** 2026-10-10 · **For:** Benjamin (personal need first, MIT open-source release intended)
 **Name chosen by Claude** — `BHNotepad`, id `com.biswashost.bhnotepad`. Say the word to rename.
 
