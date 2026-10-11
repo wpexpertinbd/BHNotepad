@@ -1,12 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Plugin and core permissions for the editor window: the native Open/Save/confirm sheets, and showing and focusing its own window. NOTE: this file does NOT bound the app's filesystem access — BHNotepad's own commands (open_path, save) read and write through std::fs in Rust and are callable by any script running in this webview. What contains that is the strict CSP in tauri.conf.json plus the fact that no remote content is ever loaded, not this allow-list. See SECURITY.md.",
+  "description": "Plugin and core permissions for the editor window: the native Open/Save/confirm sheets, showing and focusing its own window, and setting its own title bar to light or dark to match View \u2192 Theme. NOTE: this file does NOT bound the app's filesystem access — BHNotepad's own commands (open_path, save) read and write through std::fs in Rust and are callable by any script running in this webview. What contains that is the strict CSP in tauri.conf.json plus the fact that no remote content is ever loaded, not this allow-list. See SECURITY.md.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-show",
     "core:window:allow-set-focus",
+    "core:window:allow-set-theme",
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-confirm"

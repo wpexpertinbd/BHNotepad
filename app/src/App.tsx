@@ -55,6 +55,18 @@ export function App() {
   const [update, setUpdate] = useState<ipc.UpdateRelease | null>(null);
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [version, setVersion] = useState("");
+  const [theme, setTheme] = useState<cmd.ThemeChoice>(() => cmd.currentTheme());
+
+  // Applies a theme choice to the page AND to the native window, so a dark
+  // editor on a light desktop does not sit under a light title bar. Passing
+  // null hands the title bar back to the OS. A platform that cannot do this
+  // is not a failure worth reporting — the window chrome is the OS's.
+  const chooseTheme = useCallback((choice: cmd.ThemeChoice) => {
+    setTheme(cmd.applyTheme(choice));
+    void getCurrentWindow()
+      .setTheme(choice === "system" ? null : choice)
+      .catch(() => {});
+  }, []);
   /** Set by the Editor; writes the live text through, bypassing the debounce. */
   const flushEditor = useRef<(() => Promise<void>) | null>(null);
   /** Set by the Editor; drops a tab's parked document, used by Reload. */
@@ -203,10 +215,11 @@ export function App() {
     })();
   }, []);
 
-  // Restore the zoom level this machine was last left at.
+  // Restore the zoom level and theme this machine was last left at.
   useEffect(() => {
     cmd.applyFontSize(cmd.currentFontSize());
-  }, []);
+    chooseTheme(cmd.currentTheme());
+  }, [chooseTheme]);
 
   // Keep the window title showing the active tab, as Notepad++ does.
   useEffect(() => {
@@ -925,6 +938,17 @@ export function App() {
         { label: "Zoom In", shortcut: `${ACCEL}+`, run: () => cmd.zoomIn() },
         { label: "Zoom Out", shortcut: `${ACCEL}-`, run: () => cmd.zoomOut() },
         { label: "Reset Zoom", shortcut: `${ACCEL}0`, run: () => cmd.zoomReset() },
+        {
+          label: "Theme",
+          separated: true,
+          submenu: (["system", "light", "dark"] as cmd.ThemeChoice[]).map((choice) => ({
+            label:
+              theme === choice
+                ? `${cmd.THEME_LABELS[choice]} ✓`
+                : cmd.THEME_LABELS[choice],
+            run: () => chooseTheme(choice),
+          })),
+        },
         {
           label: active?.word_wrap ? "Word Wrap ✓" : "Word Wrap",
           shortcut: `${ACCEL}${SHIFT}Z`,

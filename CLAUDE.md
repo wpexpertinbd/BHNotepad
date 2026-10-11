@@ -676,3 +676,46 @@ which installer it came from.
 **The fix turned out to need no registry editing at all: reinstalling the current version puts
 `uninstall.exe` back, and the stale entry becomes valid again.** Tell users that first; deleting
 `HKCU\…\Uninstall\…` keys is the fallback, not the opening move. Now in the README.
+
+---
+
+## 🌓 Dark mode — it was always there; what was missing was CHOOSING it (2026-10-11)
+
+Benjamin: *"Does our apps have dark mode support if no then add for all OS, boss"*.
+
+**It had dark mode from the first build** — `styles.css` declares every colour as a custom
+property and redefines them under `@media (prefers-color-scheme: dark)`, and `theme.ts` points
+CodeMirror at those same tokens, so the editor, tabs, menus and Find dialog all follow together
+on all three platforms with no JavaScript involved. He had never seen it because
+**his Mac is set to Light** (`defaults read -g AppleInterfaceStyle` → key absent). Checking that
+one setting is what turned "add dark mode" into the real gap: there was no way to *ask* for it.
+
+⚠️ So the honest answer was not "yes it has it" — from where he sits, a dark mode he cannot turn
+on is not a dark mode. **Notepad++'s dark mode is independent of the Windows theme**, which is the
+behaviour his muscle memory expects.
+
+**Added: View → Theme → Follow System / Light / Dark**, remembered per machine in `localStorage`
+(`bhnotepad.theme`), same pattern as the zoom level. "Follow System" **removes** the attribute
+rather than setting `data-theme="system"` — a value no CSS rule matches would silently pin the
+light tokens.
+
+### ⚠️ The dark palette is now declared TWICE, on purpose
+CSS cannot share one declaration block between a media query and a plain selector, and both are
+needed:
+- `@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { … } }` — the automatic
+  default. **This one is why there is no white flash at startup on a dark desktop:** it paints
+  before any module runs. The `:not()` is what lets a forced *light* choice win.
+- `:root[data-theme="dark"] { … }` — the explicit choice, which must work on a **light** OS.
+
+The flash-free + single-source combination is not reachable: the only way to apply a stored
+choice before first paint is an inline `<script>` in `index.html`, which would need
+`'unsafe-inline'` in the CSP — exactly the thing the security audit leans on. Duplication is the
+cheaper price.
+
+**Guarded, not just commented:** `scripts/check-theme-tokens.mjs` compares the two blocks and
+fails the build if any token differs or goes missing. It runs in `npm run build` and as its own CI
+step. Proved non-vacuous twice — changing one colour in one copy, and deleting a token from one
+copy, both fail it with the offending line named.
+
+Also set `color-scheme: light` / `dark` on the forced choices, so native scrollbars and form
+controls stop disagreeing with the palette.

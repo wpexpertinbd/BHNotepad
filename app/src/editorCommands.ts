@@ -165,3 +165,53 @@ export function applyFontSize(size: number): number {
 export const zoomIn = () => applyFontSize(currentFontSize() + 1);
 export const zoomOut = () => applyFontSize(currentFontSize() - 1);
 export const zoomReset = () => applyFontSize(DEFAULT_FONT);
+
+// ── Theme ────────────────────────────────────────────────────────────────
+
+/**
+ * Light, dark, or whatever the operating system is set to.
+ *
+ * "system" is the default and needs no JavaScript at all — `styles.css`
+ * answers it with `prefers-color-scheme`, which is why dark mode has worked
+ * since the first build without anything here. The other two exist because
+ * that is not enough on its own: Notepad++'s dark mode is independent of the
+ * Windows theme, and someone running a light desktop with a dark editor (or
+ * the reverse) has no way to say so through the OS.
+ */
+export type ThemeChoice = "system" | "light" | "dark";
+
+/** Remembered per machine, like the zoom level. */
+const THEME_KEY = "bhnotepad.theme";
+
+export const THEME_LABELS: Record<ThemeChoice, string> = {
+  system: "Follow System",
+  light: "Light",
+  dark: "Dark",
+};
+
+export function currentTheme(): ThemeChoice {
+  try {
+    const stored = localStorage.getItem(THEME_KEY);
+    if (stored === "light" || stored === "dark" || stored === "system") return stored;
+  } catch {
+    // Private windows and blocked site data both throw; the default is fine.
+  }
+  return "system";
+}
+
+export function applyTheme(choice: ThemeChoice): ThemeChoice {
+  const root = document.documentElement;
+  if (choice === "system") {
+    // No attribute at all, so the `prefers-color-scheme` rules decide. Setting
+    // data-theme="system" would instead pin it to the light tokens.
+    root.removeAttribute("data-theme");
+  } else {
+    root.setAttribute("data-theme", choice);
+  }
+  try {
+    localStorage.setItem(THEME_KEY, choice);
+  } catch {
+    // Not worth telling anyone about: the choice still applies for this run.
+  }
+  return choice;
+}

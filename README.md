@@ -68,7 +68,9 @@ and checks all six tabs and their text came back.
 - **Find & Replace** in a proper floating dialog, not a strip glued to the window: match case,
   whole word, regular expressions, count, select all, replace all.
 - **Per-tab word wrap**, line numbers, current-line highlight, bracket matching.
-- **Light and dark** following the system, with no setting to forget about.
+- **Light and dark.** It follows the system by default, and **View → Theme** overrides that
+  when you want a dark editor on a light desktop — the way Notepad++'s dark mode is independent of
+  the Windows theme. The choice is remembered per machine.
 - **Open and save real files** when a note graduates into one, including by double-clicking one
   in Finder or Explorer — BHNotepad registers itself for about 70 text and source extensions.
 - **Line endings are preserved**: a Windows file is written back with CRLF, so a one-word change

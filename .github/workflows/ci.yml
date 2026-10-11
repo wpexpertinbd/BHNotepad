@@ -62,6 +62,10 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - run: npm ci
         working-directory: app
+      - name: Dark palette is consistent
+        # Guards the deliberate duplication in styles.css — see the script.
+        run: node scripts/check-theme-tokens.mjs
+
       - name: Typecheck and build
         run: npm run build
         working-directory: app

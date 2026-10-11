@@ -50,8 +50,22 @@
   --syn-invalid: #d1242f;
 }
 
+/* Dark mode.
+ *
+ * ⚠️ The same declarations appear TWICE on purpose, and must stay identical.
+ * CSS cannot share one declaration block between a media query and a plain
+ * selector, and both are needed:
+ *
+ *   - the @media rule is the automatic behaviour — follow the OS — and it is
+ *     what makes dark mode paint with no flash before any JavaScript runs.
+ *     It steps aside when the user has explicitly forced light.
+ *   - the [data-theme="dark"] rule is the explicit choice from View → Theme,
+ *     which has to work on a machine whose OS is set to light.
+ *
+ * `scripts/check-theme-tokens.mjs` fails the build if they drift apart.
+ * KEEP-IN-SYNC: dark-tokens */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #1b1d21;
     --editor-bg: #22252a;
     --panel-bg: #1e2126;
@@ -88,6 +102,54 @@
     --syn-operator: #a7b4c0;
     --syn-invalid: #ff6b6b;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #1b1d21;
+  --editor-bg: #22252a;
+  --panel-bg: #1e2126;
+  --input-bg: #2a2e34;
+  --text: #e3e6ea;
+  --muted: #949ba4;
+  --border: #34383f;
+  --accent: #6aa3f0;
+
+  --tab-bg: #22252a;
+  --tab-active-bg: #2d3138;
+  --tab-hover-bg: #292d33;
+
+  --gutter-bg: #1e2126;
+  --gutter-text: #6b737c;
+  --gutter-text-active: #c3c9d1;
+  --active-line: rgba(106, 163, 240, 0.08);
+  --selection: rgba(106, 163, 240, 0.26);
+  --caret: #e3e6ea;
+  --match: rgba(233, 180, 60, 0.3);
+  --match-outline: rgba(233, 180, 60, 0.55);
+  --match-selected: rgba(233, 140, 60, 0.5);
+
+  --syn-keyword: #c792ea;
+  --syn-variable: #e3e6ea;
+  --syn-function: #82aaff;
+  --syn-type: #5ec8b0;
+  --syn-constant: #f78c6c;
+  --syn-number: #f78c6c;
+  --syn-string: #9ad17f;
+  --syn-regexp: #ff9cac;
+  --syn-comment: #7d868f;
+  --syn-meta: #949ba4;
+  --syn-operator: #a7b4c0;
+  --syn-invalid: #ff6b6b;
+}
+
+/* An explicit choice must also tell the browser, so native scrollbars, form
+ * controls and the window background agree with the tokens above. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 * {
