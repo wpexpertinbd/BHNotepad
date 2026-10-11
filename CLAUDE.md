@@ -681,6 +681,8 @@ which installer it came from.
 
 ## 🌓 Dark mode — it was always there; what was missing was CHOOSING it (2026-10-11)
 
+**Shipped in v0.4.6** — 7 assets, all five build jobs green, no `.msi`.
+
 Benjamin: *"Does our apps have dark mode support if no then add for all OS, boss"*.
 
 **It had dark mode from the first build** — `styles.css` declares every colour as a custom
