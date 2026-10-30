@@ -1,11 +1,11 @@
 {
   "name": "bhnotepad",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../scripts/check-theme-tokens.mjs && node ../scripts/check-hook-order.mjs && tsc --noEmit && vite build",
+    "build": "node ../scripts/check-theme-tokens.mjs && node ../scripts/check-hook-order.mjs && node ../scripts/check-save-all-abort.mjs && tsc --noEmit && vite build",
     "check:theme": "node ../scripts/check-theme-tokens.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
