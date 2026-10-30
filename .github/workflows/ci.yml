@@ -87,6 +87,12 @@ jobs:
         # A conditional hook blanks the whole window with no error anywhere.
         run: node scripts/check-hook-order.mjs
 
+      - name: Save All can be escaped, and macOS binds Cmd+Shift+S to Save As
+        # Cancelling one sheet used to open the next, which on a session of
+        # scratch tabs is a queue of unescapable dialogs. Runs on every
+        # platform on purpose: the macOS binding is edited from any machine.
+        run: node scripts/check-save-all-abort.mjs
+
       - name: Typecheck and build
         run: npm run build
         working-directory: app

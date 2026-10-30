@@ -945,3 +945,62 @@ Opened a genuine CP437 `.nfo`: the art renders, status bar reads **CP437**. Type
 through the File menu, and the file gained exactly **`20 f1 81`** — single CP437 bytes, not the
 four UTF-8 bytes that would have corrupted it — with every original byte untouched. Font set to
 Courier New from the dialog, and both the font and the encoding survived a quit and relaunch.
+
+---
+
+## ⌨️ v0.6.1 — the Save All trap, and a shortcut that never worked (2026-10-30)
+
+Benjamin, with 21 tabs open (16 of them untitled scratch notes): *"can you check why notepad keep
+opening save screen again & again? I was just tried current file to google drive"* — then *"not even
+able to force quit it"*. The app had to be killed from a shell. **Three separate defects, and the
+third was the one nobody knew about.**
+
+### 1. 🔴 Save All could not be escaped
+`handleSaveAll`'s cancel branch did `continue`, so cancelling one sheet skipped that tab and
+immediately opened the next. On this app's *normal* state — a pile of permanently-unsaved scratch
+tabs — that is **one unescapable dialog per untitled tab**, 16 of them. And because a macOS save
+panel is a **window-modal sheet, the quit path is blocked**, so the app genuinely could not be
+quit from the UI. Cancel now `break`s and ends the run ("Stopped — nothing saved" / "Saved 1, then
+stopped").
+
+⭐ The general lesson: **a per-item prompt loop needs an abort, and the cost of not having one
+scales with the user's data.** It was invisible in testing because v0.4.4 exercised Save All with
+*two* untitled tabs, where "cancel twice" reads as normal.
+
+### 2. ⌘⇧S was Save All on macOS, where that key universally means Save As
+The Notepad++ layout (Shift = Save All) was applied to all three platforms in v0.3.0. On a Mac that
+puts Save All under the exact key a user presses to save one file somewhere else — which is how a
+single intended save became sixteen prompts. **macOS now swaps them** (⌘⇧S = Save As, ⌘⌥S = Save
+All); **Windows and Linux are untouched** and keep the Notepad++ layout, so PC muscle memory is
+safe. The menu labels are platform-dependent too, or the app would advertise a key it ignores.
+
+### 3. 🔴 ⌘⌥S HAD NEVER WORKED ON macOS — found only by driving the real app
+The key handler reads `event.key.toLowerCase()`. **Holding Option on macOS mangles `event.key`:
+S becomes `ß`, D becomes `∂`**, so `case "s"` stopped matching the moment Alt was in the chord.
+Consequence: **Save As had no working keyboard shortcut on macOS at all from v0.3.0 to v0.6.0** —
+which is very likely why ⌘⇧S got pressed in the first place. The fix reads `event.code` (the
+physical key) **only when Alt is down and `event.key` is not already a plain letter**, so a Dvorak
+or AZERTY keyboard — where `event.code` reports the QWERTY position, not the printed letter —
+keeps using `event.key` for every ordinary shortcut.
+
+⚠️ **This is the lesson, not the bug:** the guard script and `tsc` both passed on the broken
+binding. It surfaced the moment the key was pressed in a running build and *nothing happened*.
+**Any keyboard shortcut involving Option must be pressed on a real Mac before it is believed.**
+
+### Guarded
+`scripts/check-save-all-abort.mjs` (in `npm run build` and in CI, on every platform — the macOS
+binding is edited from any machine) asserts the cancel branch breaks rather than continues, that
+⌘⇧S maps to Save As on macOS, and that the menu's advertised key is platform-dependent. Proved
+non-vacuous by sabotaging each half separately.
+
+### ⚠️ Testing notes worth not re-deriving
+- **The macOS save panel does NOT respect an `HOME` override.** It runs out of process, so a test
+  copy launched with `HOME=<scratch>` still shows — and would write into — the user's **real**
+  `~/Documents`. Seed a *file-backed dirty* tab instead: Save All writes it with no dialog, which
+  tests the save path without touching anything of the user's.
+- **`pkill -x bhnotepad` kills the user's installed copy too.** A test build has a different bundle
+  id and path but the same executable NAME. Kill by PID from `ps -axo pid,command`. (Done here by
+  mistake; his app had to be relaunched. The standing rule existed and was not followed.)
+- A test copy still needs its own `identifier` in `tauri.conf.json` or single-instance hands the
+  launch to the running app and the test build exits silently — `git checkout` that file straight
+  after the build.

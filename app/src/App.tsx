@@ -18,7 +18,7 @@ import * as ipc from "./ipc";
 import type { Buffer, Session } from "./ipc";
 import { Editor } from "./Editor";
 import { TabBar } from "./TabBar";
-import { MenuBar, ACCEL, ALT, SHIFT, type Menu } from "./MenuBar";
+import { MenuBar, ACCEL, ALT, SHIFT, ON_MAC, type Menu } from "./MenuBar";
 import * as cmd from "./editorCommands";
 import { UpdateBanner } from "./UpdateBanner";
 import { FindDialog, type FindMode } from "./FindDialog";
@@ -379,7 +379,7 @@ export function App() {
     try {
       await flushEditor.current?.();
       let saved = 0;
-      let skipped = 0;
+      let stopped = false;
       let latest: Session | null = null;
 
       // Re-read after the flush: the tab just flushed may have become dirty,
@@ -389,9 +389,15 @@ export function App() {
         let target: string | undefined;
         if (!buffer.path) {
           const picked = await saveDialog({ defaultPath: buffer.title });
+          // ⚠️ Cancel ABORTS the run. It used to skip just this tab and open
+          // the next sheet, so a session of scratch notes — the normal state
+          // of this app — queued one unescapable dialog per untitled tab (21
+          // tabs, 16 of them untitled, on the session that found this). The
+          // save panel is a window-modal sheet, so the quit path is blocked
+          // too: the only way out was to cancel every single one.
           if (!picked) {
-            skipped += 1;
-            continue;
+            stopped = true;
+            break;
           }
           target = picked;
         } else if (!buffer.dirty) {
@@ -404,10 +410,10 @@ export function App() {
       if (latest) setSession(latest);
       note(
         saved === 0
-          ? skipped > 0
-            ? "Nothing saved"
+          ? stopped
+            ? "Stopped — nothing saved"
             : "Everything was already saved"
-          : `Saved ${saved}${skipped > 0 ? `, skipped ${skipped}` : ""}`,
+          : `Saved ${saved}${stopped ? ", then stopped" : ""}`,
       );
     } catch (error) {
       fail("Could not save everything", error);
@@ -725,7 +731,21 @@ export function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       const accel = event.metaKey || event.ctrlKey;
       if (!accel) return;
-      const key = event.key.toLowerCase();
+      // ⚠️ Option mangles event.key on macOS: holding it turns S into "ß", D
+      // into "∂", and so on, so every `case` below silently stopped matching
+      // the moment Alt was part of the chord — which is why Cmd+Alt+S (Save
+      // As) did nothing at all on this platform. event.code names the
+      // physical key and is unaffected.
+      //
+      // Only consulted when Alt is down AND event.key is not already a plain
+      // letter, so a Dvorak or AZERTY keyboard — where event.code reports the
+      // QWERTY position rather than the printed letter — keeps using
+      // event.key for every ordinary shortcut.
+      const physical = /^Key([A-Z])$/.exec(event.code)?.[1];
+      const key =
+        event.altKey && physical && !/^[a-z]$/.test(event.key.toLowerCase())
+          ? physical.toLowerCase()
+          : event.key.toLowerCase();
       const current = actions.current;
 
       switch (key) {
@@ -768,13 +788,24 @@ export function App() {
           void current.handleOpen();
           return;
         case "s":
-          // Matches Notepad++: Alt is Save As, Shift is Save All. These were
-          // the other way round and that is daily muscle-memory friction.
+          // Windows and Linux match Notepad++: Alt is Save As, Shift is Save
+          // All. They were the other way round once and that is daily
+          // muscle-memory friction.
+          //
+          // ⚠️ macOS is the EXCEPTION, on purpose. ⌘⇧S means Save As in every
+          // Mac application, so the Notepad++ layout put Save All under the
+          // key a Mac user presses to save one file somewhere else — which is
+          // how a session with 16 untitled tabs got 16 save sheets. The two
+          // are swapped here and only here; the PC layout is untouched.
           event.preventDefault();
           if (event.shiftKey) {
-            void current.handleSaveAll();
+            if (ON_MAC) void current.handleSave(true);
+            else void current.handleSaveAll();
+          } else if (event.altKey) {
+            if (ON_MAC) void current.handleSaveAll();
+            else void current.handleSave(true);
           } else {
-            void current.handleSave(event.altKey);
+            void current.handleSave(false);
           }
           return;
         case "f":
@@ -949,9 +980,19 @@ export function App() {
           emptyLabel: "No encodings available",
         },
         { label: "Save", shortcut: `${ACCEL}S`, separated: true, run: () => void handleSave(false) },
-        { label: "Save As…", shortcut: `${ACCEL}${ALT}S`, run: () => void handleSave(true) },
+        // The menu must advertise the same keys the handler listens for, and
+        // those are swapped on macOS — see the "s" case in the key handler.
+        {
+          label: "Save As…",
+          shortcut: ON_MAC ? `${ACCEL}${SHIFT}S` : `${ACCEL}${ALT}S`,
+          run: () => void handleSave(true),
+        },
         { label: "Save a Copy As…", run: () => void handleSaveCopy() },
-        { label: "Save All…", shortcut: `${ACCEL}${SHIFT}S`, run: () => void handleSaveAll() },
+        {
+          label: "Save All…",
+          shortcut: ON_MAC ? `${ACCEL}${ALT}S` : `${ACCEL}${SHIFT}S`,
+          run: () => void handleSaveAll(),
+        },
         { label: "Rename…", separated: true, enabled: hasFile, run: () => void handleRename() },
         {
           label: ON_WINDOWS ? "Show in Explorer" : "Show in Finder",
