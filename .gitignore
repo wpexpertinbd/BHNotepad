@@ -20,3 +20,6 @@ build-icon-source.png
 
 # macOS
 .DS_Store
+
+# Private working notes for the AI assistant (not part of the app)
+/CLAUDE.md
